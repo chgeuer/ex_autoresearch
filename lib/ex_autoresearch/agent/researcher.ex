@@ -2,13 +2,8 @@ defmodule ExAutoresearch.Agent.Researcher do
   @moduledoc """
   Autonomous experiment loop.
 
-  Orchestrates the research cycle:
-  1. Ask LLM for next experiment (or run baseline)
-  2. Apply config changes
-  3. Run training with time budget
-  4. Evaluate results
-  5. Keep or discard
-  6. Repeat forever
+  Uses ETS for status so reads never block, even during training.
+  The experiment loop runs in a separate Task.
   """
 
   use GenServer
@@ -19,13 +14,7 @@ defmodule ExAutoresearch.Agent.Researcher do
   alias ExAutoresearch.Training.Trainer
   alias ExAutoresearch.Agent.{LLM, Program}
 
-  defstruct [
-    :current_config,
-    :baseline_loss,
-    experiments: [],
-    status: :idle,
-    model: "claude-sonnet-4"
-  ]
+  @status_table __MODULE__.Status
 
   # Client API
 
@@ -38,80 +27,126 @@ defmodule ExAutoresearch.Agent.Researcher do
     GenServer.cast(__MODULE__, {:start_research, opts})
   end
 
-  @doc "Stop the experiment loop after current experiment finishes."
+  @doc "Stop after current experiment finishes."
   def stop_research do
-    GenServer.cast(__MODULE__, :stop_research)
+    put_status(:status, :stopping)
   end
 
-  @doc "Get current status."
+  @doc "Get current status (reads ETS, never blocks)."
   def status do
-    GenServer.call(__MODULE__, :status)
+    %{
+      status: get_status(:status, :idle),
+      experiment_count: get_status(:experiment_count, 0),
+      baseline_loss: get_status(:baseline_loss, nil),
+      current_config: get_status(:current_config, default_config()),
+      current_step: get_status(:current_step, nil),
+      current_progress: get_status(:current_progress, nil)
+    }
   end
 
-  @doc "Get experiment history."
+  @doc "Get experiment history (reads ETS, never blocks)."
   def experiments do
-    GenServer.call(__MODULE__, :experiments)
+    get_status(:experiments, [])
   end
 
   # Server
 
   @impl true
   def init(opts) do
+    :ets.new(@status_table, [:named_table, :set, :public, read_concurrency: true])
+
     config = Keyword.get(opts, :config, default_config())
-    model = Keyword.get(opts, :model, "claude-sonnet-4")
-    {:ok, %__MODULE__{current_config: config, model: model}}
+    put_status(:status, :idle)
+    put_status(:current_config, config)
+    put_status(:experiments, [])
+    put_status(:experiment_count, 0)
+    put_status(:baseline_loss, nil)
+    put_status(:model, Keyword.get(opts, :model, "claude-sonnet-4"))
+
+    {:ok, %{task: nil}}
   end
 
   @impl true
   def handle_cast({:start_research, opts}, state) do
-    config = Keyword.get(opts, :config, state.current_config)
-    model = Keyword.get(opts, :model, state.model)
+    config = Keyword.get(opts, :config, get_status(:current_config, default_config()))
+    put_status(:current_config, config)
+    put_status(:status, :running)
 
-    new_state = %{state | current_config: config, model: model, status: :running}
+    if opts[:model], do: put_status(:model, opts[:model])
 
     broadcast(:status_changed, %{status: :running})
 
-    # Start the loop in a separate task to not block the GenServer
-    self_pid = self()
-    Task.start(fn -> experiment_loop(self_pid) end)
-
-    {:noreply, new_state}
+    task = Task.async(fn -> experiment_loop() end)
+    {:noreply, %{state | task: task}}
   end
 
   @impl true
-  def handle_cast(:stop_research, state) do
-    Logger.info("Research stop requested — will stop after current experiment")
-    {:noreply, %{state | status: :stopping}}
+  def handle_info({ref, _result}, %{task: %Task{ref: ref}} = state) do
+    Process.demonitor(ref, [:flush])
+    put_status(:status, :idle)
+    broadcast(:status_changed, %{status: :idle})
+    {:noreply, %{state | task: nil}}
   end
 
   @impl true
-  def handle_call(:status, _from, state) do
-    {:reply,
-     %{
-       status: state.status,
-       experiment_count: length(state.experiments),
-       baseline_loss: state.baseline_loss,
-       current_config: state.current_config
-     }, state}
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{task: %Task{ref: ref}} = state) do
+    Logger.error("Experiment loop crashed: #{inspect(reason)}")
+    put_status(:status, :idle)
+    broadcast(:status_changed, %{status: :idle})
+    {:noreply, %{state | task: nil}}
   end
 
   @impl true
-  def handle_call(:experiments, _from, state) do
-    {:reply, state.experiments, state}
+  def handle_info(_, state), do: {:noreply, state}
+
+  # Experiment loop (runs in a Task, uses ETS for state)
+
+  defp experiment_loop do
+    # Ensure Trainer is running
+    case GenServer.whereis(Trainer) do
+      nil -> Trainer.start_link()
+      _pid -> :ok
+    end
+
+    # Run baseline if no experiments yet
+    if get_status(:experiment_count, 0) == 0 do
+      Logger.info("Running baseline experiment...")
+      config = get_status(:current_config, default_config())
+      run_experiment(config, "baseline")
+    end
+
+    loop()
   end
 
-  @impl true
-  def handle_call({:run_experiment, config, description}, _from, state) do
+  defp loop do
+    if get_status(:status) == :running do
+      case propose_next_experiment() do
+        {:ok, config, description} ->
+          run_experiment(config, description)
+          loop()
+
+        {:error, reason} ->
+          Logger.error("Proposal failed: #{inspect(reason)}")
+          Process.sleep(5_000)
+          loop()
+      end
+    else
+      Logger.info("Research loop stopped")
+    end
+  end
+
+  defp run_experiment(config, description) do
     experiment_id = generate_id()
     Logger.info("[#{experiment_id}] Running: #{description}")
 
     broadcast(:experiment_started, %{
       experiment_id: experiment_id,
-      description: description,
-      config: config
+      description: description
     })
 
-    # Run training
+    put_status(:current_step, 0)
+    put_status(:current_progress, 0)
+
     result =
       case Trainer.train(config, experiment_id: experiment_id) do
         {:ok, train_result} ->
@@ -123,91 +158,46 @@ defmodule ExAutoresearch.Agent.Researcher do
             status: :crashed,
             description: description,
             error: inspect(reason),
-            final_loss: nil
+            final_loss: nil,
+            num_steps: 0,
+            training_seconds: 0
           }
       end
 
-    # Decide: keep or discard
-    {kept, new_baseline, new_config} = decide(result, state)
+    # Decide keep/discard
+    baseline = get_status(:baseline_loss)
+    {kept, new_baseline} = decide(result[:final_loss], baseline)
+    full_result = Map.merge(result, %{kept: kept, id: get_status(:experiment_count, 0)})
 
-    full_result = Map.merge(result, %{kept: kept})
+    # Update ETS state
+    exps = get_status(:experiments, [])
+    put_status(:experiments, exps ++ [full_result])
+    put_status(:experiment_count, length(exps) + 1)
+    put_status(:baseline_loss, new_baseline)
+    put_status(:current_step, nil)
+    put_status(:current_progress, nil)
 
-    new_state = %{state |
-      experiments: state.experiments ++ [full_result],
-      baseline_loss: new_baseline,
-      current_config: new_config
-    }
+    if kept, do: put_status(:current_config, config)
 
     broadcast(:experiment_completed, full_result)
 
-    {:reply, full_result, new_state}
+    full_result
   end
 
-  @impl true
-  def handle_call(:should_continue?, _from, state) do
-    {:reply, state.status == :running, state}
-  end
+  defp propose_next_experiment do
+    config = get_status(:current_config, default_config())
+    experiments = get_status(:experiments, [])
 
-  @impl true
-  def handle_call({:update_status, new_status}, _from, state) do
-    {:reply, :ok, %{state | status: new_status}}
-  end
-
-  # Experiment loop (runs in a Task)
-
-  defp experiment_loop(agent_pid) do
-    # Ensure Trainer is running
-    case GenServer.whereis(Trainer) do
-      nil -> Trainer.start_link()
-      _pid -> :ok
-    end
-
-    # Run baseline first
-    state = GenServer.call(agent_pid, :status)
-    if state.experiment_count == 0 do
-      Logger.info("Running baseline experiment...")
-      config = state.current_config
-      GenServer.call(agent_pid, {:run_experiment, config, "baseline"}, :infinity)
-    end
-
-    # Loop
-    loop(agent_pid)
-  end
-
-  defp loop(agent_pid) do
-    if GenServer.call(agent_pid, :should_continue?) do
-      case propose_next_experiment(agent_pid) do
-        {:ok, config, description} ->
-          GenServer.call(agent_pid, {:run_experiment, config, description}, :infinity)
-          loop(agent_pid)
-
-        {:error, reason} ->
-          Logger.error("Failed to propose experiment: #{inspect(reason)}")
-          # Wait and retry
-          Process.sleep(5_000)
-          loop(agent_pid)
-      end
-    else
-      Logger.info("Research loop stopped")
-      GenServer.call(agent_pid, {:update_status, :idle})
-      broadcast(:status_changed, %{status: :idle})
-    end
-  end
-
-  defp propose_next_experiment(agent_pid) do
-    state = GenServer.call(agent_pid, :status)
-    experiments = GenServer.call(agent_pid, :experiments)
-
-    prompt_text = Program.format_proposal_request(experiments, state.current_config)
+    prompt_text = Program.format_proposal_request(experiments, config)
 
     Logger.info("Asking LLM for next experiment...")
     broadcast(:agent_thinking, %{prompt: String.slice(prompt_text, 0, 200) <> "..."})
 
-    case LLM.prompt(prompt_text, system: Program.system_prompt()) do
+    case LLM.prompt(prompt_text, system: Program.system_prompt(), model: get_status(:model, "claude-sonnet-4")) do
       {:ok, response} ->
-        Logger.info("LLM response: #{String.slice(response, 0, 200)}")
+        Logger.info("LLM responded (#{String.length(response)} chars)")
         broadcast(:agent_responded, %{response: response})
-        parse_proposal(response, state.current_config)
+        parse_proposal(response, config)
 
       {:error, reason} ->
         {:error, reason}
@@ -215,7 +205,6 @@ defmodule ExAutoresearch.Agent.Researcher do
   end
 
   defp parse_proposal(response, current_config) do
-    # Extract JSON from response (may be wrapped in markdown code blocks)
     json_str =
       case Regex.run(~r/```(?:json)?\s*\n(.*?)\n```/s, response) do
         [_, json] -> json
@@ -224,16 +213,13 @@ defmodule ExAutoresearch.Agent.Researcher do
 
     case Jason.decode(json_str) do
       {:ok, %{"changes" => changes, "description" => desc}} ->
-        new_config = apply_changes(current_config, changes)
-        {:ok, new_config, desc}
+        {:ok, apply_changes(current_config, changes), desc}
 
       {:ok, %{"changes" => changes}} ->
-        new_config = apply_changes(current_config, changes)
-        {:ok, new_config, "LLM experiment"}
+        {:ok, apply_changes(current_config, changes), "LLM experiment"}
 
       {:error, _} ->
-        # Try to parse the whole response as config changes
-        Logger.warning("Could not parse LLM response as JSON, using baseline config")
+        Logger.warning("Could not parse LLM JSON, using baseline config")
         {:ok, current_config, "retry (parse error)"}
     end
   end
@@ -241,52 +227,45 @@ defmodule ExAutoresearch.Agent.Researcher do
   defp apply_changes(config, changes) when is_map(changes) do
     Enum.reduce(changes, config, fn {key, value}, acc ->
       atom_key = String.to_existing_atom(key)
-      if Map.has_key?(acc, atom_key) do
-        Map.put(acc, atom_key, value)
-      else
-        Logger.warning("Unknown config key: #{key}")
-        acc
-      end
+      if Map.has_key?(acc, atom_key), do: Map.put(acc, atom_key, value), else: acc
     end)
   rescue
     _ -> config
   end
 
-  defp decide(result, state) do
-    case {result[:final_loss], state.baseline_loss} do
-      {nil, baseline} ->
-        # Crash — discard
-        {false, baseline, state.current_config}
-
-      {loss, nil} ->
-        # First run — this becomes the baseline
-        Logger.info("Baseline established: loss=#{loss}")
-        {true, loss, state.current_config}
-
-      {loss, baseline} when loss < baseline ->
-        improvement = Float.round(baseline - loss, 6)
-        Logger.info("✅ Improvement! #{baseline} → #{loss} (Δ#{improvement})")
-        {true, loss, result[:config] || state.current_config}
-
-      {loss, baseline} ->
-        Logger.info("❌ No improvement: #{loss} >= #{baseline}")
-        {false, baseline, state.current_config}
-    end
+  defp decide(nil, baseline), do: {false, baseline}
+  defp decide(loss, nil) do
+    Logger.info("Baseline established: loss=#{loss}")
+    {true, loss}
+  end
+  defp decide(loss, baseline) when loss < baseline do
+    Logger.info("✅ Improvement! #{baseline} → #{loss} (Δ#{Float.round(baseline - loss, 6)})")
+    {true, loss}
+  end
+  defp decide(loss, baseline) do
+    Logger.info("❌ No improvement: #{loss} >= #{baseline}")
+    {false, baseline}
   end
 
   defp default_config do
     %Config{
-      n_layer: 2,
-      aspect_ratio: 16,
-      n_head: 2,
-      n_kv_head: 2,
-      head_dim: 16,
-      vocab_size: 256,
-      sequence_len: 32,
-      device_batch_size: 4,
-      time_budget: 15,
-      matrix_lr: 0.01
+      n_layer: 2, aspect_ratio: 16, n_head: 2, n_kv_head: 2, head_dim: 16,
+      vocab_size: 256, sequence_len: 32, device_batch_size: 4,
+      time_budget: 15, matrix_lr: 0.01
     }
+  end
+
+  # ETS helpers
+
+  defp put_status(key, value), do: :ets.insert(@status_table, {key, value})
+
+  defp get_status(key, default \\ nil) do
+    case :ets.lookup(@status_table, key) do
+      [{^key, value}] -> value
+      [] -> default
+    end
+  rescue
+    ArgumentError -> default
   end
 
   defp broadcast(event, payload) do

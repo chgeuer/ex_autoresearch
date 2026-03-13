@@ -58,7 +58,7 @@ config :spark,
 config :ex_autoresearch,
   ecto_repos: [ExAutoresearch.Repo],
   generators: [timestamp_type: :utc_datetime],
-  ash_domains: []
+  ash_domains: [ExAutoresearch.Research]
 
 # Configure the endpoint
 config :ex_autoresearch, ExAutoresearchWeb.Endpoint,
