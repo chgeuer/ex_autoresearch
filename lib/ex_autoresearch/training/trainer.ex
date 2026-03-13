@@ -184,20 +184,24 @@ defmodule ExAutoresearch.Training.Trainer do
     Logger.info("[#{experiment_id}] Starting training (JIT warmup first, then #{config.time_budget}s)")
 
     # Run training — use a large iteration count; halt_handler stops us on time
-    _final_state = Axon.Loop.run(loop, data, %{}, epochs: 1, iterations: 100_000)
+    final_state = Axon.Loop.run(loop, data, %{}, epochs: 1, iterations: 100_000)
 
     training_start = Process.get(:training_start_time) || System.monotonic_time(:millisecond)
     elapsed_ms = System.monotonic_time(:millisecond) - training_start
     elapsed_s = elapsed_ms / 1000
 
-    # Extract final metrics
+    # Extract final metrics — prefer Axon state, fall back to process dict
     final_step = Process.get(:training_steps, 0)
 
-    final_loss = case Process.get(:last_loss) do
-      val when is_float(val) and val > 0.0 -> val
-      %Nx.Tensor{} = t -> Nx.to_number(t)
-      _ -> nil
-    end
+    final_loss =
+      case final_state do
+        %Axon.Loop.State{metrics: %{"loss" => %Nx.Tensor{} = t}} ->
+          val = Nx.to_number(t)
+          if val > 0.0, do: val, else: Process.get(:last_loss)
+
+        _ ->
+          Process.get(:last_loss)
+      end
 
     result = %{
       experiment_id: experiment_id,

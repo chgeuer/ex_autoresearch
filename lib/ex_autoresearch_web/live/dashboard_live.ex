@@ -2,7 +2,6 @@ defmodule ExAutoresearchWeb.DashboardLive do
   use ExAutoresearchWeb, :live_view
 
   alias ExAutoresearch.Agent.Researcher
-  alias ExAutoresearch.Training.Trainer
 
   @impl true
   def mount(_params, _session, socket) do
@@ -93,7 +92,7 @@ defmodule ExAutoresearchWeb.DashboardLive do
   end
 
   @impl true
-  def handle_info({:agent_thinking, payload}, socket) do
+  def handle_info({:agent_thinking, _payload}, socket) do
     {:noreply, add_log(socket, "🤔 Thinking...")}
   end
 
