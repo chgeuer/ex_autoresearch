@@ -32,7 +32,9 @@ defmodule ExAutoresearch.Agent.LLM do
       end
 
     args =
-      ["-p", full_prompt] ++
+      ["-p", full_prompt, "--silent",
+       "--deny-tool", "create", "--deny-tool", "edit",
+       "--deny-tool", "write", "--deny-tool", "bash"] ++
         if(model, do: ["--model", model], else: [])
 
     Logger.debug("LLM prompt (#{String.length(full_prompt)} chars, model: #{model})")

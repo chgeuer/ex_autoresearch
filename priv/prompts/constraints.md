@@ -1,5 +1,6 @@
 ## Constraints
 
+- **OUTPUT FORMAT: Print the complete defmodule as a fenced elixir code block in your response. Do NOT use any tools to create or write files. Just output the code as text.**
 - Your module MUST be named `ExAutoresearch.Experiments.V_<version_id>` (the system fills in the version_id)
 - Your module MUST implement these callbacks:
   - `config/0` — returns a map with model hyperparameters
