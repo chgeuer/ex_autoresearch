@@ -39,3 +39,8 @@ npm-debug.log
 *.db
 *.db-*
 
+# Runtime files
+run.log
+.dev_node.log
+.dev_node.pid
+
