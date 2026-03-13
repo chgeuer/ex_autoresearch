@@ -16,11 +16,24 @@ gpu_target = System.get_env("GPU_TARGET", "rocm")
 config :nx, default_backend: {EXLA.Backend, client: String.to_atom(gpu_target)}
 config :nx, default_defn_options: [compiler: EXLA, client: String.to_atom(gpu_target)]
 
-config :exla, :clients,
-  host: [platform: :host],
-  cuda: [platform: :cuda, preallocate: true],
-  # preallocate: false for iGPU (shared RAM) to avoid freezing the OS
-  rocm: [platform: :rocm, preallocate: false]
+# Configure only the clients that match the compiled XLA target.
+# EXLA initializes ALL listed clients at startup — listing cuda when
+# the NIF was compiled for ROCm (or vice versa) crashes the EXLA.Client.
+xla_target = System.get_env("XLA_TARGET", "rocm")
+
+exla_clients =
+  case xla_target do
+    "rocm" ->
+      [host: [platform: :host], rocm: [platform: :rocm, preallocate: false]]
+
+    "cuda" ->
+      [host: [platform: :host], cuda: [platform: :cuda, preallocate: true]]
+
+    _ ->
+      [host: [platform: :host]]
+  end
+
+config :exla, :clients, exla_clients
 # The block below contains prod specific runtime configuration.
 
 # ## Using releases
