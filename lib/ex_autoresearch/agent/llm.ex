@@ -102,16 +102,28 @@ defmodule ExAutoresearch.Agent.LLM do
   # Streaming events from Copilot
 
   @impl true
-  def handle_info({:server_event, %{type: "assistant.message.chunk", data: data}}, state) do
-    chunk = data["chunkContent"] || ""
-    {:noreply, %{state | buffer: state.buffer <> chunk}}
-  end
+  def handle_info({:server_event, %{type: type, data: data}}, %{caller: from} = state) do
+    case type do
+      # Server protocol sends full message, not chunks
+      "assistant.message" ->
+        content = data["content"] || ""
+        Logger.debug("LLM message: #{String.length(content)} chars")
+        {:noreply, %{state | buffer: state.buffer <> content}}
 
-  def handle_info({:server_event, %{type: "session.idle"}}, %{caller: from} = state) when not is_nil(from) do
-    # Turn complete — reply to caller with accumulated text
-    response = String.trim(state.buffer)
-    GenServer.reply(from, {:ok, response})
-    {:noreply, %{state | status: :idle, buffer: "", caller: nil}}
+      # Also handle chunk-based protocols (ACP mode)
+      "assistant.message.chunk" ->
+        chunk = data["chunkContent"] || data["content"] || ""
+        {:noreply, %{state | buffer: state.buffer <> chunk}}
+
+      "session.idle" when not is_nil(from) ->
+        response = String.trim(state.buffer)
+        Logger.debug("LLM turn complete: #{String.length(response)} chars")
+        GenServer.reply(from, {:ok, response})
+        {:noreply, %{state | status: :idle, buffer: "", caller: nil}}
+
+      _ ->
+        {:noreply, state}
+    end
   end
 
   def handle_info({:server_event, _event}, state) do
