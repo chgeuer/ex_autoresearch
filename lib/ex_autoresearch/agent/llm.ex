@@ -32,7 +32,7 @@ defmodule ExAutoresearch.Agent.LLM do
       end
 
     args =
-      ["-p", full_prompt, "--silent",
+      ["-p", full_prompt, "--silent", "--allow-all-tools",
        "--deny-tool", "create", "--deny-tool", "edit",
        "--deny-tool", "write", "--deny-tool", "bash"] ++
         if(model, do: ["--model", model], else: [])
