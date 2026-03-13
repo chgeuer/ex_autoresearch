@@ -184,7 +184,7 @@ defmodule ExAutoresearch.Training.Trainer do
     Logger.info("[#{experiment_id}] Starting training (JIT warmup first, then #{config.time_budget}s)")
 
     # Run training — use a large iteration count; halt_handler stops us on time
-    final_state = Axon.Loop.run(loop, data, %{}, epochs: 1, iterations: 100_000)
+    _final_state = Axon.Loop.run(loop, data, %{}, epochs: 1, iterations: 100_000)
 
     training_start = Process.get(:training_start_time) || System.monotonic_time(:millisecond)
     elapsed_ms = System.monotonic_time(:millisecond) - training_start
