@@ -145,15 +145,15 @@ defmodule ExAutoresearchWeb.DashboardLive do
     |> Enum.reverse()
   end
 
-  defp trial_to_map(%{version_id: _} = exp) do
-    # From Ash struct
+  defp trial_to_map(%ExAutoresearch.Research.Trial{} = exp) do
+    # From Ash struct (SQLite)
     %{id: exp.version_id, version_id: exp.version_id, loss: exp.final_loss,
       steps: exp.num_steps, training_seconds: exp.training_seconds,
       description: exp.description, kept: exp.kept, status: exp.status,
       model: exp.model, timestamp: exp.inserted_at}
   end
   defp trial_to_map(r) when is_map(r) do
-    # From PubSub event
+    # From PubSub event (plain map with :loss/:steps keys)
     %{id: r[:version_id], version_id: r[:version_id], loss: r[:loss],
       steps: r[:steps], training_seconds: r[:training_seconds],
       description: r[:description], kept: r[:kept], status: r[:status],
