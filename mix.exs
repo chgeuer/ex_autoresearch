@@ -121,6 +121,7 @@ defmodule ExAutoresearch.MixProject do
       {:exla, "~> 0.10.0"},
       {:axon, "~> 0.7"},
       {:polaris, "~> 0.1"},
+      {:table_rex, "~> 4.0"},
 
       # Data
       # {:arrow, "~> 0.1", only: [:dev, :test]},

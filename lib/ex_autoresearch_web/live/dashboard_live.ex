@@ -17,7 +17,9 @@ defmodule ExAutoresearchWeb.DashboardLive do
     selected =
       if agent.best_version, do: load_version(agent.best_version), else: nil
 
-    models = build_model_options()
+    current_backend = :copilot
+    current_model = agent.model || "claude-sonnet-4"
+    backend_models = models_for_backend(current_backend)
 
     socket =
       socket
@@ -30,8 +32,9 @@ defmodule ExAutoresearchWeb.DashboardLive do
       |> assign(:current_progress, nil)
       |> assign(:agent_log, [])
       |> assign(:selected, selected)
-      |> assign(:models, models)
-      |> assign(:current_model, "copilot:#{agent.model || "claude-sonnet-4"}")
+      |> assign(:current_backend, current_backend)
+      |> assign(:current_model, current_model)
+      |> assign(:backend_models, backend_models)
       |> assign(:chart_trials, trials)
       |> stream(:trials, trials, at: 0)
 
@@ -42,9 +45,13 @@ defmodule ExAutoresearchWeb.DashboardLive do
 
   @impl true
   def handle_event("start_research", _params, socket) do
-    {_backend, model} = parse_backend_model(socket.assigns.current_model)
-    Researcher.start_research(tag: socket.assigns.campaign_tag, model: model)
-    {:noreply, assign(socket, :agent_status, :running)}
+    tag = socket.assigns.campaign_tag || default_tag()
+    model = socket.assigns.current_model
+    backend = socket.assigns.current_backend
+
+    ExAutoresearch.Agent.LLM.set_backend(backend, model)
+    Researcher.start_research(tag: tag, model: model)
+    {:noreply, socket |> assign(:agent_status, :running) |> assign(:campaign_tag, tag)}
   end
 
   @impl true
@@ -67,13 +74,32 @@ defmodule ExAutoresearchWeb.DashboardLive do
   end
 
   @impl true
-  def handle_event("change_model", %{"model" => model_id}, socket) do
-    # Parse "backend:model" format (e.g. "copilot:claude-opus-4.6")
-    {backend, model} = parse_backend_model(model_id)
+  def handle_event("change_backend", %{"backend" => backend_str}, socket) do
+    backend = String.to_existing_atom(backend_str)
+    models = models_for_backend(backend)
+    default_model = models |> List.first() |> elem(0)
+
+    ExAutoresearch.Agent.LLM.set_backend(backend, default_model)
+    Researcher.set_model(default_model)
+
+    {:noreply,
+     socket
+     |> assign(:current_backend, backend)
+     |> assign(:current_model, default_model)
+     |> assign(:backend_models, models)
+     |> add_log("🔄 Backend -> #{backend}:#{default_model}")}
+  end
+
+  @impl true
+  def handle_event("change_model", %{"model" => model}, socket) do
+    backend = socket.assigns.current_backend
     ExAutoresearch.Agent.LLM.set_backend(backend, model)
     Researcher.set_model(model)
-    short = "#{backend}:#{String.replace(model, "claude-", "")}"
-    {:noreply, socket |> assign(:current_model, model_id) |> add_log("🔄 #{short}")}
+
+    {:noreply,
+     socket
+     |> assign(:current_model, model)
+     |> add_log("🔄 Model -> #{model}")}
   end
 
   # --- PubSub ---
@@ -269,35 +295,34 @@ defmodule ExAutoresearchWeb.DashboardLive do
   defp fmt_time(%DateTime{} = dt), do: Calendar.strftime(dt, "%H:%M:%S")
   defp fmt_time(_), do: ""
 
-  defp parse_backend_model(combined) do
-    case String.split(combined, ":", parts: 2) do
-      [backend, model] -> {String.to_existing_atom(backend), model}
-      [model] -> {:copilot, model}
-    end
-  rescue
-    _ -> {:copilot, combined}
+
+  defp models_for_backend(:copilot) do
+    Jido.GHCopilot.Models.all()
+    |> Enum.map(fn {name, id, mult} ->
+      label = "#{name}#{if mult > 1, do: " (#{mult}x)", else: ""}"
+      {id, label}
+    end)
   end
 
-  defp build_model_options do
-    copilot_models =
-      Jido.GHCopilot.Models.all()
-      |> Enum.map(fn {name, id, mult} ->
-        label = "Copilot: #{name}#{if mult > 1, do: " (#{mult}x)", else: ""}"
-        {"copilot:#{id}", label}
-      end)
-
-    claude_models = [
-      {"claude:claude-sonnet-4", "Claude: Sonnet 4"},
-      {"claude:claude-sonnet-4-thinking", "Claude: Sonnet 4 (thinking)"},
-      {"claude:claude-opus-4", "Claude: Opus 4"}
+  defp models_for_backend(:claude) do
+    [
+      {"sonnet", "Sonnet 4"},
+      {"claude-sonnet-4-thinking", "Sonnet 4 (thinking)"},
+      {"opus", "Opus 4"}
     ]
+  end
 
-    gemini_models = [
-      {"gemini:gemini-2.5-pro", "Gemini: 2.5 Pro"},
-      {"gemini:gemini-2.5-flash", "Gemini: 2.5 Flash"}
+  defp models_for_backend(:gemini) do
+    [
+      {"gemini-2.5-pro", "Gemini 2.5 Pro"},
+      {"gemini-2.5-flash", "Gemini 2.5 Flash"}
     ]
+  end
 
-    copilot_models ++ claude_models ++ gemini_models
+  defp default_tag do
+    {{_y, m, d}, _} = :calendar.local_time()
+    month = Enum.at(~w(jan feb mar apr may jun jul aug sep oct nov dec), m - 1)
+    "#{month}#{d}"
   end
 
   # --- Render ---
@@ -318,16 +343,17 @@ defmodule ExAutoresearchWeb.DashboardLive do
               <% end %>
             </p>
           </div>
-          <div class="flex items-center gap-3">
-            <select
-              phx-change="change_model"
-              name="model"
-              class="bg-zinc-800 border border-zinc-700 text-zinc-300 text-sm rounded-lg px-3 py-1.5 focus:ring-indigo-500 focus:border-indigo-500"
-            >
-              <%= for {id, label} <- @models do %>
-                <option value={id} selected={id == @current_model}>
-                  {label}
-                </option>
+          <div class="flex items-center gap-2">
+            <select phx-change="change_backend" name="backend"
+              class="bg-zinc-800 border border-zinc-700 text-zinc-300 text-sm rounded-lg px-2 py-1.5 focus:ring-indigo-500 focus:border-indigo-500">
+              <option value="copilot" selected={@current_backend == :copilot}>Copilot</option>
+              <option value="claude" selected={@current_backend == :claude}>Claude</option>
+              <option value="gemini" selected={@current_backend == :gemini}>Gemini</option>
+            </select>
+            <select phx-change="change_model" name="model"
+              class="bg-zinc-800 border border-zinc-700 text-zinc-300 text-sm rounded-lg px-2 py-1.5 focus:ring-indigo-500 focus:border-indigo-500">
+              <%= for {id, label} <- @backend_models do %>
+                <option value={id} selected={id == @current_model}><%= label %></option>
               <% end %>
             </select>
             <span class={["px-3 py-1 rounded-full text-sm font-medium", status_class(@agent_status)]}>
