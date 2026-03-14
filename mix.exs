@@ -125,8 +125,10 @@ defmodule ExAutoresearch.MixProject do
       # Data
       # {:arrow, "~> 0.1", only: [:dev, :test]},
 
-      # Agent / LLM (GitHub Copilot via Server protocol)
+      # Agent / LLM backends
       {:jido_ghcopilot, path: Path.expand("~/github/agentjido/jido_ghcopilot")},
+      {:claude_agent_sdk, "~> 0.14"},
+      {:gemini_cli_sdk, "~> 0.1"},
       # Required transitive overrides (not on hex.pm)
       {:jido_shell, path: Path.expand("~/github/agentjido/jido_shell"), override: true},
       {:jido_harness, path: Path.expand("~/github/agentjido/jido_harness"), override: true},

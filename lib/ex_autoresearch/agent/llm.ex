@@ -208,15 +208,11 @@ defmodule ExAutoresearch.Agent.LLM do
   end
 
   defp start_backend(:claude, model) do
-    # TODO: implement when jido_claude is wired up
-    Logger.warning("Claude backend not yet implemented")
-    {:error, :not_implemented}
+    ExAutoresearch.Agent.LLM.ClaudeBackend.start_link(model: model)
   end
 
   defp start_backend(:gemini, model) do
-    # TODO: implement when jido_gemini is wired up
-    Logger.warning("Gemini backend not yet implemented")
-    {:error, :not_implemented}
+    ExAutoresearch.Agent.LLM.GeminiBackend.start_link(model: model)
   end
 
   defp get_backend_pid(state, backend) do

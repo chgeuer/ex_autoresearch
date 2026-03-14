@@ -286,8 +286,18 @@ defmodule ExAutoresearchWeb.DashboardLive do
         {"copilot:#{id}", label}
       end)
 
-    # Claude and Gemini placeholders — will be populated when backends are wired up
-    copilot_models
+    claude_models = [
+      {"claude:claude-sonnet-4", "Claude: Sonnet 4"},
+      {"claude:claude-sonnet-4-thinking", "Claude: Sonnet 4 (thinking)"},
+      {"claude:claude-opus-4", "Claude: Opus 4"}
+    ]
+
+    gemini_models = [
+      {"gemini:gemini-2.5-pro", "Gemini: 2.5 Pro"},
+      {"gemini:gemini-2.5-flash", "Gemini: 2.5 Flash"}
+    ]
+
+    copilot_models ++ claude_models ++ gemini_models
   end
 
   # --- Render ---
