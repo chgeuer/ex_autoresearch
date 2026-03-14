@@ -21,6 +21,7 @@ defmodule ExAutoresearch.Research.Run do
 
     create :start do
       accept [:tag, :model, :time_budget, :base_config]
+      primary? true
     end
 
     update :update_status do

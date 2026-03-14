@@ -20,6 +20,7 @@ defmodule ExAutoresearch.Research.Experiment do
     defaults [:read]
 
     create :record do
+      primary? true
       accept [
         :run_id,
         :version_id,
