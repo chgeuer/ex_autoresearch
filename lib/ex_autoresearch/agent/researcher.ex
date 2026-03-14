@@ -63,7 +63,7 @@ defmodule ExAutoresearch.Agent.Researcher do
 
   @doc "Get current status (reads from SQLite, never blocks)."
   def status do
-    case Registry.active_run() do
+    case Registry.active_campaign() do
       {:ok, nil} ->
         %{
           status: :idle,
@@ -100,7 +100,7 @@ defmodule ExAutoresearch.Agent.Researcher do
 
   @doc "Get all experiments for the active run."
   def experiments do
-    case Registry.active_run() do
+    case Registry.active_campaign() do
       {:ok, nil} -> []
       {:ok, run} -> Registry.all_trials(run.id)
     end
@@ -112,6 +112,17 @@ defmodule ExAutoresearch.Agent.Researcher do
 
   @impl true
   def init(_opts) do
+    # Reset any stale :running campaigns left over from a previous app session
+    case Registry.active_campaign() do
+      {:ok, run} when not is_nil(run) ->
+        Logger.info("Resetting stale running campaign #{run.tag} to paused")
+        Registry.pause_campaign(run)
+        broadcast(:status_changed, %{status: :paused})
+
+      _ ->
+        :ok
+    end
+
     {:ok, %__MODULE__{}}
   end
 
@@ -144,7 +155,7 @@ defmodule ExAutoresearch.Agent.Researcher do
     Logger.info("Stop requested — will stop after current experiment")
 
     if state.campaign_id do
-      case Registry.get_run_by_id(state.campaign_id) do
+      case Registry.get_campaign_by_id(state.campaign_id) do
         {:ok, run} when not is_nil(run) -> Registry.pause_campaign(run)
         _ -> :ok
       end
@@ -158,7 +169,7 @@ defmodule ExAutoresearch.Agent.Researcher do
     Logger.info("Switching model to: #{model_id}")
 
     if state.campaign_id do
-      case Registry.get_run_by_id(state.campaign_id) do
+      case Registry.get_campaign_by_id(state.campaign_id) do
         {:ok, run} when not is_nil(run) -> Registry.update_campaign_model(run, model_id)
         _ -> :ok
       end

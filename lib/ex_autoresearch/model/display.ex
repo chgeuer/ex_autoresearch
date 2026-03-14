@@ -41,7 +41,7 @@ defmodule ExAutoresearch.Model.Display do
         end)
       end)
 
-    style_lines =
+    _style_lines =
       sorted
       |> Enum.map(fn {id, node} ->
         style_class = case node.op do
@@ -50,8 +50,9 @@ defmodule ExAutoresearch.Model.Display do
           :embedding -> ":::embed"
           :layer_norm -> ":::norm"
           :add -> ":::add"
-          op when op in [:relu, :gelu, :silu, :tanh, :sigmoid] -> ":::activation"
+          op when is_atom(op) and op in [:relu, :gelu, :silu, :tanh, :sigmoid] -> ":::activation"
           :nx -> ":::custom"
+          f when is_function(f) -> ":::custom"
           _ -> ""
         end
         if style_class != "", do: "    n#{id}#{style_class}", else: nil
@@ -68,27 +69,38 @@ defmodule ExAutoresearch.Model.Display do
 
   defp format_node_label(node) do
     name = get_node_name(node)
-    op = node.op
+    op = safe_str(node.op)
 
     params =
       node.parameters
       |> Enum.map(fn p ->
         shape = if p.shape, do: inspect(p.shape), else: "?"
-        "#{p.name}: #{shape}"
+        pname = safe_str(p.name)
+        "#{pname}: #{shape}"
       end)
 
     param_str = if params != [], do: "\\n#{Enum.join(params, ", ")}", else: ""
 
     "#{name} (#{op})#{param_str}"
+  rescue
+    _ -> safe_str(node.op)
   end
 
   defp get_node_name(node) do
-    case node.name do
-      f when is_function(f, 2) -> f.(:op_name, node.op_name)
-      name when is_binary(name) -> name
-      _ -> to_string(node.op)
-    end
+    result =
+      case node.name do
+        f when is_function(f, 2) -> f.(:op_name, node.op_name)
+        name when is_binary(name) -> name
+        _ -> safe_str(node.op)
+      end
+
+    safe_str(result)
   rescue
-    _ -> to_string(node.op)
+    _ -> safe_str(node.op)
   end
+
+  defp safe_str(v) when is_binary(v), do: v
+  defp safe_str(v) when is_atom(v), do: Atom.to_string(v)
+  defp safe_str(v) when is_function(v), do: "fn"
+  defp safe_str(v), do: inspect(v)
 end

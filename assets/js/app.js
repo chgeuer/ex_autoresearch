@@ -49,6 +49,18 @@ const Chart = {
 const Mermaid = {
   mounted() {
     this.renderDiagram()
+    this.el.addEventListener('mermaid:export-svg', () => {
+      const svg = this.el.querySelector('svg')
+      if (!svg) return
+      const svgData = new XMLSerializer().serializeToString(svg)
+      const blob = new Blob([svgData], { type: 'image/svg+xml' })
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = 'model-architecture.svg'
+      a.click()
+      URL.revokeObjectURL(url)
+    })
   },
   updated() {
     this.renderDiagram()
@@ -86,7 +98,21 @@ const Mermaid = {
     try {
       const id = 'mermaid-render-' + Math.random().toString(36).slice(2)
       const { svg } = await window.mermaid.render(id, diagram)
-      this.el.innerHTML = svg
+      // Wrap SVG in a zoomable container
+      const wrapper = document.createElement('div')
+      wrapper.style.cssText = 'transform-origin: top center; transition: transform 0.1s ease-out; cursor: grab;'
+      wrapper.innerHTML = svg
+      this.el.innerHTML = ''
+      this.el.appendChild(wrapper)
+      this.el.style.overflow = 'auto'
+
+      let scale = 1
+      this.el.addEventListener('wheel', (e) => {
+        if (!e.ctrlKey && !e.metaKey) return
+        e.preventDefault()
+        scale = Math.min(5, Math.max(0.3, scale - e.deltaY * 0.002))
+        wrapper.style.transform = `scale(${scale})`
+      }, { passive: false })
     } catch(e) {
       this.el.innerHTML = '<div class="text-red-400 text-xs p-2">Diagram render failed: ' + e.message + '</div>'
     }
@@ -96,7 +122,7 @@ const Mermaid = {
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
-  params: {_csrf_token: csrfToken},
+  params: {_csrf_token: csrfToken, timezone: Intl.DateTimeFormat().resolvedOptions().timeZone},
   hooks: {...colocatedHooks, Chart, Mermaid},
 })
 

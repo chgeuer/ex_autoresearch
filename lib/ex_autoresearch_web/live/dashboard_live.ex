@@ -6,6 +6,12 @@ defmodule ExAutoresearchWeb.DashboardLive do
 
   @impl true
   def mount(_params, _session, socket) do
+    timezone =
+      case get_connect_params(socket) do
+        %{"timezone" => tz} when is_binary(tz) and tz != "" -> tz
+        _ -> "Etc/UTC"
+      end
+
     if connected?(socket) do
       Phoenix.PubSub.subscribe(ExAutoresearch.PubSub, "agent:events")
       :timer.send_interval(2000, self(), :tick)
@@ -23,6 +29,7 @@ defmodule ExAutoresearchWeb.DashboardLive do
 
     socket =
       socket
+      |> assign(:timezone, timezone)
       |> assign(:agent_status, agent.status)
       |> assign(:best_loss, agent.best_loss)
       |> assign(:best_version, agent.best_version)
@@ -278,6 +285,9 @@ defmodule ExAutoresearchWeb.DashboardLive do
       |> Enum.reverse()
       |> Enum.filter(& &1[:loss])
 
+    losses = Enum.map(trials, & &1[:loss])
+    y_max = chart_y_max(losses)
+
     data =
       Enum.with_index(trials)
       |> Enum.map(fn {t, i} ->
@@ -288,18 +298,22 @@ defmodule ExAutoresearchWeb.DashboardLive do
         }
       end)
 
+    y_axis = %{
+      type: "value",
+      name: "Loss",
+      nameLocation: "center",
+      nameGap: 45,
+      min: 0,
+      axisLabel: %{formatter: "{value}"}
+    }
+
+    y_axis = if y_max, do: Map.put(y_axis, :max, y_max), else: y_axis
+
     chart_option = %{
       backgroundColor: "transparent",
       tooltip: %{trigger: "item", formatter: "{c}"},
       xAxis: %{type: "value", name: "Trial #", nameLocation: "center", nameGap: 25},
-      yAxis: %{
-        type: "value",
-        name: "Loss",
-        nameLocation: "center",
-        nameGap: 45,
-        min: 0,
-        axisLabel: %{formatter: "{value}"}
-      },
+      yAxis: y_axis,
       series: [
         %{
           type: "scatter",
@@ -311,6 +325,23 @@ defmodule ExAutoresearchWeb.DashboardLive do
     }
 
     push_event(socket, "chart-data-loss-chart", chart_option)
+  end
+
+  # Compute a Y-axis max that suppresses extreme outliers using IQR method.
+  # Returns nil if fewer than 4 data points (let ECharts auto-scale).
+  defp chart_y_max(losses) when length(losses) < 4, do: nil
+
+  defp chart_y_max(losses) do
+    sorted = Enum.sort(losses)
+    n = length(sorted)
+    q1 = Enum.at(sorted, div(n, 4))
+    q3 = Enum.at(sorted, div(3 * n, 4))
+    iqr = q3 - q1
+    fence = q3 + 1.5 * iqr
+
+    # Use the fence as max, but at least include the median * 3 so the chart isn't too tight
+    median = Enum.at(sorted, div(n, 2))
+    max(fence, median * 3) |> Float.ceil(1)
   end
 
   defp safe_fmt(nil), do: "-"
@@ -326,9 +357,16 @@ defmodule ExAutoresearchWeb.DashboardLive do
       |> String.replace("gpt-", "gpt")
       |> String.replace("-preview", "")
 
-  defp fmt_time(nil), do: ""
-  defp fmt_time(%DateTime{} = dt), do: Calendar.strftime(dt, "%H:%M:%S")
-  defp fmt_time(_), do: ""
+  defp fmt_time(nil, _tz), do: ""
+
+  defp fmt_time(%DateTime{} = dt, tz) do
+    case DateTime.shift_zone(dt, tz) do
+      {:ok, local} -> Calendar.strftime(local, "%H:%M:%S")
+      _ -> Calendar.strftime(dt, "%H:%M:%S")
+    end
+  end
+
+  defp fmt_time(_, _tz), do: ""
 
 
   defp models_for_backend(:copilot) do
@@ -379,20 +417,23 @@ defmodule ExAutoresearchWeb.DashboardLive do
             </p>
           </div>
           <div class="flex items-center gap-2">
-            <select phx-change="change_backend" name="backend" id="backend-select"
-              class="bg-zinc-800 border border-zinc-700 text-zinc-300 text-sm rounded-lg px-2 py-1.5 focus:ring-indigo-500 focus:border-indigo-500">
-              <option value="copilot" selected={@current_backend == :copilot}>Copilot</option>
-              <option value="claude" selected={@current_backend == :claude}>Claude</option>
-              <option value="gemini" selected={@current_backend == :gemini}>Gemini</option>
-            </select>
-            <%!-- Wrap in a div with dynamic id so LiveView fully replaces it on backend change --%>
-            <div id={"model-wrapper-#{@current_backend}"}>
-              <select phx-change="change_model" name="model" id={"model-select-#{@current_backend}"}
+            <form phx-change="change_backend">
+              <select name="backend" id="backend-select"
                 class="bg-zinc-800 border border-zinc-700 text-zinc-300 text-sm rounded-lg px-2 py-1.5 focus:ring-indigo-500 focus:border-indigo-500">
-                <%= for {id, label} <- @backend_models do %>
-                  <option value={id} selected={id == @current_model}><%= label %></option>
-                <% end %>
+                <option value="copilot" selected={@current_backend == :copilot}>Copilot</option>
+                <option value="claude" selected={@current_backend == :claude}>Claude</option>
+                <option value="gemini" selected={@current_backend == :gemini}>Gemini</option>
               </select>
+            </form>
+            <div id={"model-wrapper-#{@current_backend}"}>
+              <form phx-change="change_model">
+                <select name="model" id={"model-select-#{@current_backend}"}
+                  class="bg-zinc-800 border border-zinc-700 text-zinc-300 text-sm rounded-lg px-2 py-1.5 focus:ring-indigo-500 focus:border-indigo-500">
+                  <%= for {id, label} <- @backend_models do %>
+                    <option value={id} selected={id == @current_model}><%= label %></option>
+                  <% end %>
+                </select>
+              </form>
             </div>
             <span class={["px-3 py-1 rounded-full text-sm font-medium", status_class(@agent_status)]}>
               {@agent_status}
@@ -411,6 +452,14 @@ defmodule ExAutoresearchWeb.DashboardLive do
               >
                 ⏹ Stop
               </button>
+            <% end %>
+            <%= if @campaign_tag do %>
+              <a
+                href={~p"/export/#{@campaign_tag}"}
+                class="px-4 py-2 bg-zinc-700 hover:bg-zinc-600 text-zinc-200 rounded-lg text-sm font-medium transition"
+              >
+                📦 Export
+              </a>
             <% end %>
           </div>
         </div>
@@ -461,7 +510,7 @@ defmodule ExAutoresearchWeb.DashboardLive do
                     ]}
                   >
                     <td class="py-1.5 px-2 text-xs text-zinc-500 font-mono">
-                      {fmt_time(t[:timestamp])}
+                      {fmt_time(t[:timestamp], @timezone)}
                     </td>
                     <td class="py-1.5 px-2">
                       <div class="font-mono text-xs text-zinc-400">
@@ -546,7 +595,17 @@ defmodule ExAutoresearchWeb.DashboardLive do
               </div>
               <%!-- Architecture diagram --%>
               <div>
-                <h3 class="text-sm font-medium text-zinc-400 mb-2">Model Architecture</h3>
+                <div class="flex items-center justify-between mb-2">
+                  <h3 class="text-sm font-medium text-zinc-400">Model Architecture</h3>
+                  <%= if @selected[:mermaid] do %>
+                    <button
+                      phx-click={JS.dispatch("mermaid:export-svg", to: "#mermaid-#{@selected[:version_id]}")}
+                      class="text-xs text-zinc-500 hover:text-zinc-300 transition-colors cursor-pointer"
+                    >
+                      Export SVG
+                    </button>
+                  <% end %>
+                </div>
                 <%= if @selected[:mermaid] do %>
                   <div
                     id={"mermaid-#{@selected[:version_id]}"}

@@ -20,6 +20,7 @@ defmodule ExAutoresearchWeb.Router do
     pipe_through :browser
 
     live "/", DashboardLive
+    get "/export/:tag", ExportController, :campaign
   end
 
   # Other scopes may use custom stacks.
