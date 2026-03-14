@@ -19,6 +19,7 @@ defmodule ExAutoresearch.Experiments.Loader do
 
   Returns {:ok, module} or {:error, reason}.
   """
+  @spec load(String.t(), String.t()) :: {:ok, module()} | {:error, term()}
   def load(version_id, code) do
     with :ok <- validate_syntax(code),
          :ok <- validate_namespace(code, version_id),
@@ -34,6 +35,7 @@ defmodule ExAutoresearch.Experiments.Loader do
 
   If the LLM outputs a module with a placeholder name, this replaces it.
   """
+  @spec inject_version_id(String.t(), String.t()) :: String.t()
   def inject_version_id(code, version_id) do
     module_name = "#{@namespace}.V_#{version_id}"
 
@@ -51,7 +53,9 @@ defmodule ExAutoresearch.Experiments.Loader do
 
   defp validate_syntax(code) do
     case Code.string_to_quoted(code) do
-      {:ok, _ast} -> :ok
+      {:ok, _ast} ->
+        :ok
+
       {:error, {meta, msg, token}} ->
         line = Keyword.get(meta, :line, "?")
         {:error, {:syntax_error, "Line #{line}: #{msg} #{token}"}}
@@ -60,6 +64,7 @@ defmodule ExAutoresearch.Experiments.Loader do
 
   defp validate_namespace(code, version_id) do
     expected = "#{@namespace}.V_#{version_id}"
+
     if String.contains?(code, expected) do
       :ok
     else

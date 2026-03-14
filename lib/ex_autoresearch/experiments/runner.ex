@@ -12,6 +12,15 @@ defmodule ExAutoresearch.Experiments.Runner do
 
   @default_time_budget 15
 
+  @run_schema NimbleOptions.new!(
+                time_budget: [type: :pos_integer, default: 15, doc: "Seconds per trial"],
+                version_id: [
+                  type: :string,
+                  default: "unknown",
+                  doc: "Experiment version identifier"
+                ]
+              )
+
   @doc """
   Train an experiment module and return results.
 
@@ -20,10 +29,16 @@ defmodule ExAutoresearch.Experiments.Runner do
   - build/0 → Axon model
   - optimizer/0 → Polaris optimizer
   - loss_fn/2 (optional) → custom loss function
+
+  ## Options
+
+  #{NimbleOptions.docs(@run_schema)}
   """
+  @spec run(module(), keyword()) :: map()
   def run(module, opts \\ []) do
-    time_budget = Keyword.get(opts, :time_budget, @default_time_budget)
-    version_id = Keyword.get(opts, :version_id, "unknown")
+    opts = NimbleOptions.validate!(opts, @run_schema)
+    time_budget = opts[:time_budget]
+    version_id = opts[:version_id]
     do_run(module, version_id, time_budget)
   end
 
@@ -44,7 +59,9 @@ defmodule ExAutoresearch.Experiments.Runner do
       else
         fn y_pred, y_true ->
           Axon.Losses.categorical_cross_entropy(y_pred, y_true,
-            from_logits: true, reduction: :mean)
+            from_logits: true,
+            reduction: :mean
+          )
         end
       end
 
@@ -71,7 +88,9 @@ defmodule ExAutoresearch.Experiments.Runner do
         %{"loss" => %Nx.Tensor{} = loss} ->
           val = Nx.to_number(loss)
           if val > 0.0, do: Process.put(:last_loss, val)
-        _ -> :ok
+
+        _ ->
+          :ok
       end
 
       start = Process.get(:training_start_time)
@@ -83,14 +102,22 @@ defmodule ExAutoresearch.Experiments.Runner do
     progress_handler = fn state ->
       try do
         step = Process.get(:training_steps, 0)
+
         if rem(step, 50) == 0 do
           loss = Process.get(:last_loss)
           if loss, do: Logger.debug("[#{version_id}] step=#{step} loss=#{safe_round(loss, 6)}")
         end
 
-        Phoenix.PubSub.broadcast(ExAutoresearch.PubSub, "agent:events",
-          {:step, %{step: step, loss: Process.get(:last_loss),
-                    progress: training_progress(time_budget_ms)}})
+        Phoenix.PubSub.broadcast(
+          ExAutoresearch.PubSub,
+          "agent:events",
+          {:step,
+           %{
+             step: step,
+             loss: Process.get(:last_loss),
+             progress: training_progress(time_budget_ms)
+           }}
+        )
       rescue
         _ -> :ok
       end
@@ -113,7 +140,9 @@ defmodule ExAutoresearch.Experiments.Runner do
     steps = Process.get(:training_steps, 0)
     loss = Process.get(:last_loss)
 
-    Logger.info("[#{version_id}] Done: #{steps} steps in #{safe_round(elapsed_s, 1)}s, loss=#{loss && safe_round(loss, 6)}")
+    Logger.info(
+      "[#{version_id}] Done: #{steps} steps in #{safe_round(elapsed_s, 1)}s, loss=#{loss && safe_round(loss, 6)}"
+    )
 
     %{
       version_id: version_id,
@@ -126,13 +155,22 @@ defmodule ExAutoresearch.Experiments.Runner do
   rescue
     e ->
       Logger.error("[#{version_id}] Training crashed: #{Exception.message(e)}")
-      %{version_id: version_id, status: :crashed, loss: nil, steps: 0,
-        training_seconds: 0, error: Exception.message(e)}
+
+      %{
+        version_id: version_id,
+        status: :crashed,
+        loss: nil,
+        steps: 0,
+        training_seconds: 0,
+        error: Exception.message(e)
+      }
   end
 
   defp training_progress(time_budget_ms) do
     case Process.get(:training_start_time) do
-      nil -> 0.0
+      nil ->
+        0.0
+
       start ->
         elapsed = System.monotonic_time(:millisecond) - start
         safe_round(min(elapsed / time_budget_ms, 1.0) * 100, 1)

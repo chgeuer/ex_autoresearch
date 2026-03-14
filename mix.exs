@@ -10,7 +10,11 @@ defmodule ExAutoresearch.MixProject do
   unless System.get_env("XLA_BUILD") do
     case System.get_env("XLA_TARGET") do
       "rocm" ->
-        System.put_env("XLA_ARCHIVE_URL", System.get_env("XLA_ARCHIVE_URL") || xla_rocm_archive_url)
+        System.put_env(
+          "XLA_ARCHIVE_URL",
+          System.get_env("XLA_ARCHIVE_URL") || xla_rocm_archive_url
+        )
+
         System.put_env("XLA_TARGET", "rocm")
 
       "cuda" ->
@@ -20,7 +24,11 @@ defmodule ExAutoresearch.MixProject do
 
       _ ->
         # Default to ROCm (Framework Laptop iGPU)
-        System.put_env("XLA_ARCHIVE_URL", System.get_env("XLA_ARCHIVE_URL") || xla_rocm_archive_url)
+        System.put_env(
+          "XLA_ARCHIVE_URL",
+          System.get_env("XLA_ARCHIVE_URL") || xla_rocm_archive_url
+        )
+
         System.put_env("XLA_TARGET", "rocm")
     end
   end
@@ -106,6 +114,7 @@ defmodule ExAutoresearch.MixProject do
       {:jason, "~> 1.2"},
       {:dns_cluster, "~> 0.2.0"},
       {:bandit, "~> 1.5"},
+      {:nimble_options, "~> 1.1"},
 
       # ML / GPU
       {:nx, "~> 0.10.0"},
@@ -122,7 +131,7 @@ defmodule ExAutoresearch.MixProject do
       {:jido_shell, path: Path.expand("~/github/agentjido/jido_shell"), override: true},
       {:jido_harness, path: Path.expand("~/github/agentjido/jido_harness"), override: true},
       {:jido_vfs, path: Path.expand("~/github/agentjido/jido_vfs"), override: true},
-      {:sprites, github: "mikehostetler/sprites-ex", override: true},
+      {:sprites, github: "mikehostetler/sprites-ex", override: true}
     ]
   end
 

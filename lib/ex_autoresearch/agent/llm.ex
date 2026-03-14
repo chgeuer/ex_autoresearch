@@ -16,6 +16,11 @@ defmodule ExAutoresearch.Agent.LLM do
 
   defstruct [:conn, :session_id, :model, status: :disconnected, buffer: "", caller: nil]
 
+  @prompt_schema NimbleOptions.new!(
+                   system: [type: :string, doc: "System prompt (prepended to the user prompt)"],
+                   model: [type: :string, doc: "Override the session model"]
+                 )
+
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
@@ -23,13 +28,15 @@ defmodule ExAutoresearch.Agent.LLM do
   @doc """
   Send a prompt and wait for the complete response.
 
-  Options:
-  - model: override the session model
-  - system: system prompt (prepended to the user prompt)
+  ## Options
+
+  #{NimbleOptions.docs(@prompt_schema)}
   """
+  @spec prompt(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def prompt(text, opts \\ []) do
-    system = Keyword.get(opts, :system)
-    model = Keyword.get(opts, :model)
+    opts = NimbleOptions.validate!(opts, @prompt_schema)
+    system = opts[:system]
+    model = opts[:model]
 
     full_prompt =
       if system do
@@ -92,6 +99,7 @@ defmodule ExAutoresearch.Agent.LLM do
           {:ok, new_state} ->
             Logger.info("LLM switched to model: #{requested_model}")
             new_state
+
           {:error, reason} ->
             Logger.warning("Model switch failed: #{inspect(reason)}, using #{state.model}")
             state
@@ -149,9 +157,11 @@ defmodule ExAutoresearch.Agent.LLM do
   # Deny any tool calls — we only want text output
   def handle_info({:server_tool_call, tool_call}, state) do
     Logger.debug("LLM tool call denied: #{tool_call.tool_name}")
+
     Connection.respond_to_tool_call(state.conn, tool_call.request_id, %{
       "error" => "No tools available. Output code as text in your response."
     })
+
     {:noreply, state}
   end
 
@@ -166,6 +176,7 @@ defmodule ExAutoresearch.Agent.LLM do
   def terminate(_reason, %{conn: conn}) when not is_nil(conn) do
     Connection.stop(conn)
   end
+
   def terminate(_, _), do: :ok
 
   # Create a new session with a different model on the same connection
