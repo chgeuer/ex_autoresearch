@@ -25,7 +25,7 @@ defmodule ExAutoresearch.Research.Campaign do
     end
 
     update :update_status do
-      accept [:status, :model, :best_experiment_id]
+      accept [:status, :model, :best_trial_id]
     end
   end
 
@@ -39,7 +39,7 @@ defmodule ExAutoresearch.Research.Campaign do
     attribute :model, :string, default: "claude-sonnet-4"
     attribute :time_budget, :integer, default: 15
     attribute :base_config, :map
-    attribute :best_experiment_id, :uuid_v7
+    attribute :best_trial_id, :uuid_v7
 
     timestamps()
   end

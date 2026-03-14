@@ -9,12 +9,12 @@ defmodule ExAutoresearch.Repo.Migrations.PersistentRuns do
       add :model, :string, default: "claude-sonnet-4"
       add :time_budget, :integer, default: 15
       add :base_config, :map
-      add :best_experiment_id, :binary_id
+      add :best_trial_id, :binary_id
 
       timestamps(type: :utc_datetime)
     end
 
-    create unique_index(:runs, [:tag])
+    create unique_index(:campaigns, [:tag])
 
     # Recreate experiments with run_id + new fields
     drop_if_exists table(:trials)
@@ -39,8 +39,8 @@ defmodule ExAutoresearch.Repo.Migrations.PersistentRuns do
       timestamps(type: :utc_datetime)
     end
 
-    create index(:experiments, [:campaign_id])
-    create index(:experiments, [:version_id])
-    create index(:experiments, [:campaign_id, :kept])
+    create index(:trials, [:campaign_id])
+    create index(:trials, [:version_id])
+    create index(:trials, [:campaign_id, :kept])
   end
 end
