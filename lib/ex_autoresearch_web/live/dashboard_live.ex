@@ -344,18 +344,21 @@ defmodule ExAutoresearchWeb.DashboardLive do
             </p>
           </div>
           <div class="flex items-center gap-2">
-            <select phx-change="change_backend" name="backend"
+            <select phx-change="change_backend" name="backend" id="backend-select"
               class="bg-zinc-800 border border-zinc-700 text-zinc-300 text-sm rounded-lg px-2 py-1.5 focus:ring-indigo-500 focus:border-indigo-500">
               <option value="copilot" selected={@current_backend == :copilot}>Copilot</option>
               <option value="claude" selected={@current_backend == :claude}>Claude</option>
               <option value="gemini" selected={@current_backend == :gemini}>Gemini</option>
             </select>
-            <select phx-change="change_model" name="model" id={"model-select-#{@current_backend}"}
-              class="bg-zinc-800 border border-zinc-700 text-zinc-300 text-sm rounded-lg px-2 py-1.5 focus:ring-indigo-500 focus:border-indigo-500">
-              <%= for {id, label} <- @backend_models do %>
-                <option value={id} selected={id == @current_model}><%= label %></option>
-              <% end %>
-            </select>
+            <%!-- Wrap in a div with dynamic id so LiveView fully replaces it on backend change --%>
+            <div id={"model-wrapper-#{@current_backend}"}>
+              <select phx-change="change_model" name="model" id={"model-select-#{@current_backend}"}
+                class="bg-zinc-800 border border-zinc-700 text-zinc-300 text-sm rounded-lg px-2 py-1.5 focus:ring-indigo-500 focus:border-indigo-500">
+                <%= for {id, label} <- @backend_models do %>
+                  <option value={id} selected={id == @current_model}><%= label %></option>
+                <% end %>
+              </select>
+            </div>
             <span class={["px-3 py-1 rounded-full text-sm font-medium", status_class(@agent_status)]}>
               {@agent_status}
             </span>
