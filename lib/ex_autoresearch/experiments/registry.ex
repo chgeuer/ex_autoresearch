@@ -12,7 +12,7 @@ defmodule ExAutoresearch.Experiments.Registry do
   require Logger
   require Ash.Query
 
-  alias ExAutoresearch.Research.{Run, Experiment}
+  alias ExAutoresearch.Research.{Campaign, Trial}
   alias ExAutoresearch.Experiments.Loader
 
   @modules_table __MODULE__.Modules
@@ -21,14 +21,14 @@ defmodule ExAutoresearch.Experiments.Registry do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   end
 
-  # --- Run management ---
+  # --- Campaign management ---
 
-  def start_run(tag, opts \\ []) do
+  def start_campaign(tag, opts \\ []) do
     model = Keyword.get(opts, :model, "claude-sonnet-4")
     time_budget = Keyword.get(opts, :time_budget, 15)
     base_config = Keyword.get(opts, :base_config, %{})
 
-    Ash.create!(Run, %{
+    Ash.create!(Campaign, %{
       tag: tag,
       model: model,
       time_budget: time_budget,
@@ -36,91 +36,91 @@ defmodule ExAutoresearch.Experiments.Registry do
     })
   end
 
-  def get_run(tag) do
-    Run
+  def get_campaign(tag) do
+    Campaign
     |> Ash.Query.filter(tag == ^tag)
     |> Ash.read_one()
   end
 
-  def get_run!(tag) do
-    case get_run(tag) do
+  def get_campaign!(tag) do
+    case get_campaign(tag) do
       {:ok, run} -> run
-      {:error, reason} -> raise "Run '#{tag}' not found: #{inspect(reason)}"
+      {:error, reason} -> raise "Campaign '#{tag}' not found: #{inspect(reason)}"
     end
   end
 
-  def get_run_by_id(id) do
-    case Ash.get(Run, id) do
+  def get_campaign_by_id(id) do
+    case Ash.get(Campaign, id) do
       {:ok, run} -> {:ok, run}
       {:error, _} -> {:ok, nil}
     end
   end
 
-  def active_run do
-    Run
+  def active_campaign do
+    Campaign
     |> Ash.Query.filter(status == :running)
     |> Ash.Query.sort(updated_at: :desc)
     |> Ash.Query.limit(1)
     |> Ash.read_one()
   end
 
-  def pause_run(run) do
+  def pause_campaign(run) do
     Ash.update!(run, %{status: :paused}, action: :update_status)
   end
 
-  def resume_run(run) do
+  def resume_campaign(run) do
     Ash.update!(run, %{status: :running}, action: :update_status)
   end
 
-  def update_run_model(run, model) do
+  def update_campaign_model(run, model) do
     Ash.update!(run, %{model: model}, action: :update_status)
   end
 
-  def update_run_best(run, experiment_id) do
-    Ash.update!(run, %{best_experiment_id: experiment_id}, action: :update_status)
+  def update_campaign_best(run, experiment_id) do
+    Ash.update!(run, %{best_trial_id: experiment_id}, action: :update_status)
   end
 
-  # --- Experiment CRUD (SQLite-backed) ---
+  # --- Trial CRUD (SQLite-backed) ---
 
-  def all_experiments(run_id) do
-    Experiment
-    |> Ash.Query.filter(run_id == ^run_id)
+  def all_trials(campaign_id) do
+    Trial
+    |> Ash.Query.filter(campaign_id == ^campaign_id)
     |> Ash.Query.sort(inserted_at: :asc)
     |> Ash.read!()
   end
 
-  def get_experiment(version_id) do
-    Experiment
+  def get_trial(version_id) do
+    Trial
     |> Ash.Query.filter(version_id == ^version_id)
     |> Ash.read_one()
   end
 
-  def count_experiments(run_id) do
-    Experiment
-    |> Ash.Query.filter(run_id == ^run_id)
+  def count_trials(campaign_id) do
+    Trial
+    |> Ash.Query.filter(campaign_id == ^campaign_id)
     |> Ash.count!()
   end
 
-  def best_experiment(run_id) do
-    Experiment
-    |> Ash.Query.filter(run_id == ^run_id and kept == true and not is_nil(final_loss))
+  def best_trial(campaign_id) do
+    Trial
+    |> Ash.Query.filter(campaign_id == ^campaign_id and kept == true and not is_nil(final_loss))
     |> Ash.Query.sort(final_loss: :asc)
     |> Ash.Query.limit(1)
     |> Ash.read_one!()
   end
 
-  def kept_experiments(run_id) do
-    Experiment
-    |> Ash.Query.filter(run_id == ^run_id and kept == true and not is_nil(code))
+  def kept_trials(campaign_id) do
+    Trial
+    |> Ash.Query.filter(campaign_id == ^campaign_id and kept == true and not is_nil(code))
     |> Ash.Query.sort(final_loss: :asc)
     |> Ash.read!()
   end
 
-  def record_experiment(attrs) do
-    Ash.create!(Experiment, attrs, action: :record)
+  def record_trial(attrs) do
+    Ash.create!(Trial, attrs, action: :record)
   end
 
-  def complete_experiment(experiment, attrs) do
+  def complete_trial(experiment, attrs) do
     Ash.update!(experiment, attrs, action: :complete)
   end
 

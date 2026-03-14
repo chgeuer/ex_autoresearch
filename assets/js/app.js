@@ -24,12 +24,32 @@ import {Socket} from "phoenix"
 import {LiveSocket} from "phoenix_live_view"
 import {hooks as colocatedHooks} from "phoenix-colocated/ex_autoresearch"
 import topbar from "../vendor/topbar"
+import * as echarts from "../vendor/echarts.min"
+
+// ECharts hook for LiveView
+const Chart = {
+  mounted() {
+    this.chart = echarts.init(this.el, 'dark')
+    this.handleEvent(`chart-data-${this.el.id}`, (data) => {
+      this.chart.setOption(data, { notMerge: true })
+    })
+    this.chart.on('click', (params) => {
+      if (params.data && params.data.version_id) {
+        this.pushEvent("select_version", { version: params.data.version_id })
+      }
+    })
+    new ResizeObserver(() => this.chart.resize()).observe(this.el)
+  },
+  destroyed() {
+    if (this.chart) this.chart.dispose()
+  }
+}
 
 const csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
 const liveSocket = new LiveSocket("/live", Socket, {
   longPollFallbackMs: 2500,
   params: {_csrf_token: csrfToken},
-  hooks: {...colocatedHooks},
+  hooks: {...colocatedHooks, Chart},
 })
 
 // Show progress bar on live navigation and form submits

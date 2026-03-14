@@ -1,4 +1,4 @@
-defmodule ExAutoresearch.Research.Experiment do
+defmodule ExAutoresearch.Research.Trial do
   @moduledoc """
   A single experiment — one version of the model, trained and evaluated.
 
@@ -12,7 +12,7 @@ defmodule ExAutoresearch.Research.Experiment do
     data_layer: AshSqlite.DataLayer
 
   sqlite do
-    table "experiments"
+    table "trials"
     repo ExAutoresearch.Repo
   end
 
@@ -22,7 +22,7 @@ defmodule ExAutoresearch.Research.Experiment do
     create :record do
       primary? true
       accept [
-        :run_id,
+        :campaign_id,
         :version_id,
         :status,
         :code,
@@ -47,7 +47,7 @@ defmodule ExAutoresearch.Research.Experiment do
   attributes do
     uuid_v7_primary_key :id
 
-    attribute :run_id, :uuid_v7, allow_nil?: false
+    attribute :campaign_id, :uuid_v7, allow_nil?: false
     attribute :version_id, :string, allow_nil?: false
     attribute :status, :atom,
       constraints: [one_of: [:pending, :running, :completed, :crashed, :discarded]],
@@ -68,6 +68,6 @@ defmodule ExAutoresearch.Research.Experiment do
   end
 
   relationships do
-    belongs_to :run, ExAutoresearch.Research.Run
+    belongs_to :campaign, ExAutoresearch.Research.Campaign
   end
 end

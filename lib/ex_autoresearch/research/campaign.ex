@@ -1,4 +1,4 @@
-defmodule ExAutoresearch.Research.Run do
+defmodule ExAutoresearch.Research.Campaign do
   @moduledoc """
   A research run — a named session of autonomous experimentation.
 
@@ -12,7 +12,7 @@ defmodule ExAutoresearch.Research.Run do
     data_layer: AshSqlite.DataLayer
 
   sqlite do
-    table "runs"
+    table "campaigns"
     repo ExAutoresearch.Repo
   end
 
@@ -45,7 +45,7 @@ defmodule ExAutoresearch.Research.Run do
   end
 
   relationships do
-    has_many :experiments, ExAutoresearch.Research.Experiment
+    has_many :trials, ExAutoresearch.Research.Trial
   end
 
   identities do

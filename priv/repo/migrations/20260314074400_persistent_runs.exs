@@ -2,7 +2,7 @@ defmodule ExAutoresearch.Repo.Migrations.PersistentRuns do
   use Ecto.Migration
 
   def change do
-    create table(:runs, primary_key: false) do
+    create table(:campaigns, primary_key: false) do
       add :id, :binary_id, null: false, primary_key: true
       add :tag, :string, null: false
       add :status, :string, default: "running"
@@ -17,11 +17,11 @@ defmodule ExAutoresearch.Repo.Migrations.PersistentRuns do
     create unique_index(:runs, [:tag])
 
     # Recreate experiments with run_id + new fields
-    drop_if_exists table(:experiments)
+    drop_if_exists table(:trials)
 
-    create table(:experiments, primary_key: false) do
+    create table(:trials, primary_key: false) do
       add :id, :binary_id, null: false, primary_key: true
-      add :run_id, references(:runs, type: :binary_id, on_delete: :delete_all), null: false
+      add :campaign_id, references(:campaigns, type: :binary_id, on_delete: :delete_all), null: false
       add :version_id, :string, null: false
       add :status, :string, default: "pending"
       add :code, :text
@@ -39,8 +39,8 @@ defmodule ExAutoresearch.Repo.Migrations.PersistentRuns do
       timestamps(type: :utc_datetime)
     end
 
-    create index(:experiments, [:run_id])
+    create index(:experiments, [:campaign_id])
     create index(:experiments, [:version_id])
-    create index(:experiments, [:run_id, :kept])
+    create index(:experiments, [:campaign_id, :kept])
   end
 end

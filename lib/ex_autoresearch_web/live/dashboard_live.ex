@@ -12,40 +12,33 @@ defmodule ExAutoresearchWeb.DashboardLive do
     end
 
     agent = Researcher.status()
-    experiments = Researcher.experiments()
-      |> Enum.map(fn exp ->
-        %{id: exp.version_id, version_id: exp.version_id, loss: exp.final_loss,
-          steps: exp.num_steps, training_seconds: exp.training_seconds,
-          description: exp.description, kept: exp.kept, status: exp.status,
-          model: exp.model}
-      end)
+    trials = load_trials()
 
     selected =
-      if agent.best_version do
-        load_version(agent.best_version)
-      else
-        nil
-      end
+      if agent.best_version, do: load_version(agent.best_version), else: nil
 
     models = Jido.GHCopilot.Models.all()
-    current_model = agent.model || "claude-sonnet-4"
 
     socket =
       socket
       |> assign(:agent_status, agent.status)
       |> assign(:best_loss, agent.best_loss)
       |> assign(:best_version, agent.best_version)
-      |> assign(:experiment_count, agent.experiment_count)
+      |> assign(:trial_count, agent.trial_count)
+      |> assign(:campaign_tag, agent.campaign_tag)
       |> assign(:current_step, nil)
       |> assign(:current_progress, nil)
       |> assign(:agent_log, [])
       |> assign(:selected, selected)
       |> assign(:models, models)
-      |> assign(:current_model, current_model)
-      |> stream(:experiments, experiments)
+      |> assign(:current_model, agent.model || "claude-sonnet-4")
+      |> assign(:chart_trials, trials)
+      |> stream(:trials, trials, at: 0)
 
-    {:ok, socket}
+    {:ok, push_chart(socket)}
   end
+
+  # --- Events ---
 
   @impl true
   def handle_event("start_research", _params, socket) do
@@ -67,8 +60,7 @@ defmodule ExAutoresearchWeb.DashboardLive do
   @impl true
   def handle_event("select_best", _params, socket) do
     agent = Researcher.status()
-    selected = if agent.best_version, do: load_version(agent.best_version), else: nil
-    {:noreply, assign(socket, :selected, selected)}
+    {:noreply, assign(socket, :selected, if(agent.best_version, do: load_version(agent.best_version)))}
   end
 
   @impl true
@@ -76,6 +68,8 @@ defmodule ExAutoresearchWeb.DashboardLive do
     Researcher.set_model(model_id)
     {:noreply, socket |> assign(:current_model, model_id) |> add_log("🔄 Model → #{model_id}")}
   end
+
+  # --- PubSub ---
 
   @impl true
   def handle_info(:tick, socket) do
@@ -85,11 +79,12 @@ defmodule ExAutoresearchWeb.DashboardLive do
      |> assign(:agent_status, agent.status)
      |> assign(:best_loss, agent.best_loss)
      |> assign(:best_version, agent.best_version)
-     |> assign(:experiment_count, agent.experiment_count)}
+     |> assign(:trial_count, agent.trial_count)
+     |> assign(:campaign_tag, agent.campaign_tag)}
   end
 
   @impl true
-  def handle_info({:experiment_started, p}, socket) do
+  def handle_info({:trial_started, p}, socket) do
     {:noreply,
      socket
      |> assign(:current_step, 0)
@@ -98,22 +93,24 @@ defmodule ExAutoresearchWeb.DashboardLive do
   end
 
   @impl true
-  def handle_info({:experiment_completed, r}, socket) do
+  def handle_info({:trial_completed, r}, socket) do
     tag = if r[:kept], do: "✅ kept", else: "❌ discarded"
-    entry = %{id: r[:version_id], version_id: r[:version_id], loss: r[:loss],
-              steps: r[:steps], training_seconds: r[:training_seconds],
-              description: r[:description], kept: r[:kept], status: r[:status],
-              model: r[:model]}
+    entry = trial_to_map(r)
+
+    # Add to chart data
+    chart_trials = [entry | socket.assigns.chart_trials]
 
     socket =
       socket
-      |> stream_insert(:experiments, entry)
+      |> stream_insert(:trials, entry, at: 0)
       |> assign(:current_step, nil)
       |> assign(:current_progress, nil)
+      |> assign(:chart_trials, chart_trials)
       |> add_log("#{tag} v_#{r[:version_id]} loss=#{safe_fmt(r[:loss])} — #{r[:description]}")
 
     socket = if r[:kept], do: assign(socket, :selected, load_version(r[:version_id])), else: socket
-    {:noreply, socket}
+
+    {:noreply, push_chart(socket)}
   end
 
   @impl true
@@ -123,23 +120,43 @@ defmodule ExAutoresearchWeb.DashboardLive do
 
   @impl true
   def handle_info({:agent_thinking, _}, socket), do: {:noreply, add_log(socket, "🤔 Thinking...")}
-
   @impl true
   def handle_info({:agent_responded, p}, socket), do: {:noreply, add_log(socket, "💡 #{p[:reasoning] || "..."}")}
-
   @impl true
   def handle_info({:status_changed, p}, socket), do: {:noreply, assign(socket, :agent_status, p[:status])}
-
   @impl true
   def handle_info(_, socket), do: {:noreply, socket}
+
+  # --- Helpers ---
 
   defp add_log(socket, msg) do
     ts = Calendar.strftime(DateTime.utc_now(), "%H:%M:%S")
     assign(socket, :agent_log, ["#{ts} #{msg}" | socket.assigns.agent_log] |> Enum.take(100))
   end
 
+  defp load_trials do
+    Researcher.experiments()
+    |> Enum.map(&trial_to_map/1)
+    |> Enum.reverse()
+  end
+
+  defp trial_to_map(%{version_id: _} = exp) do
+    # From Ash struct
+    %{id: exp.version_id, version_id: exp.version_id, loss: exp.final_loss,
+      steps: exp.num_steps, training_seconds: exp.training_seconds,
+      description: exp.description, kept: exp.kept, status: exp.status,
+      model: exp.model, timestamp: exp.inserted_at}
+  end
+  defp trial_to_map(r) when is_map(r) do
+    # From PubSub event
+    %{id: r[:version_id], version_id: r[:version_id], loss: r[:loss],
+      steps: r[:steps], training_seconds: r[:training_seconds],
+      description: r[:description], kept: r[:kept], status: r[:status],
+      model: r[:model], timestamp: DateTime.utc_now()}
+  end
+
   defp load_version(vid) do
-    case Registry.get_experiment(vid) do
+    case Registry.get_trial(vid) do
       {:ok, nil} -> nil
       {:ok, exp} -> %{version_id: exp.version_id, code: exp.code || "(no source)",
                        loss: exp.final_loss, steps: exp.num_steps, description: exp.description,
@@ -148,17 +165,44 @@ defmodule ExAutoresearchWeb.DashboardLive do
     end
   end
 
-  defp safe_fmt(nil), do: "—"
+  defp push_chart(socket) do
+    trials = socket.assigns.chart_trials
+      |> Enum.reverse()
+      |> Enum.filter(& &1[:loss])
+
+    data = Enum.with_index(trials)
+      |> Enum.map(fn {t, i} ->
+        %{value: [i, t[:loss]], version_id: t[:version_id],
+          itemStyle: if(t[:kept], do: %{color: "#34d399"}, else: %{color: "#ef4444"})}
+      end)
+
+    chart_option = %{
+      backgroundColor: "transparent",
+      tooltip: %{trigger: "item", formatter: "{c}"},
+      xAxis: %{type: "value", name: "Trial #", nameLocation: "center", nameGap: 25},
+      yAxis: %{type: "value", name: "Loss", nameLocation: "center", nameGap: 45,
+               min: 0, axisLabel: %{formatter: "{value}"}},
+      series: [%{
+        type: "scatter", symbolSize: 8, data: data,
+        emphasis: %{itemStyle: %{borderColor: "#818cf8", borderWidth: 2}}
+      }]
+    }
+
+    push_event(socket, "chart-data-loss-chart", chart_option)
+  end
+
+  defp safe_fmt(nil), do: "-"
   defp safe_fmt(l) when is_float(l), do: :erlang.float_to_binary(l, decimals: 6)
   defp safe_fmt(l), do: to_string(l)
 
-  defp short_model(nil), do: "—"
-  defp short_model(m) do
-    m
-    |> String.replace("claude-", "")
-    |> String.replace("gpt-", "gpt")
-    |> String.replace("-preview", "")
-  end
+  defp short_model(nil), do: "-"
+  defp short_model(m), do: m |> String.replace("claude-", "") |> String.replace("gpt-", "gpt") |> String.replace("-preview", "")
+
+  defp fmt_time(nil), do: ""
+  defp fmt_time(%DateTime{} = dt), do: Calendar.strftime(dt, "%H:%M:%S")
+  defp fmt_time(_), do: ""
+
+  # --- Render ---
 
   @impl true
   def render(assigns) do
@@ -169,21 +213,26 @@ defmodule ExAutoresearchWeb.DashboardLive do
         <div class="flex items-center justify-between">
           <div>
             <h1 class="text-2xl font-bold text-zinc-100">🔬 ex_autoresearch</h1>
-            <p class="text-zinc-400 text-sm">BEAM-native autonomous GPT research · Hot-loaded versioned modules</p>
+            <p class="text-zinc-400 text-sm">
+              BEAM-native autonomous research
+              <%= if @campaign_tag do %>
+                · Campaign: <span class="text-indigo-400 font-mono">{@campaign_tag}</span>
+              <% end %>
+            </p>
           </div>
           <div class="flex items-center gap-3">
             <select phx-change="change_model" name="model"
               class="bg-zinc-800 border border-zinc-700 text-zinc-300 text-sm rounded-lg px-3 py-1.5 focus:ring-indigo-500 focus:border-indigo-500">
               <%= for {name, id, mult} <- @models do %>
                 <option value={id} selected={id == @current_model}>
-                  <%= name %><%= if mult > 1, do: " (#{mult}×)", else: "" %>
+                  <%= name %><%= if mult > 1, do: " (#{mult}x)", else: "" %>
                 </option>
               <% end %>
             </select>
             <span class={["px-3 py-1 rounded-full text-sm font-medium", status_class(@agent_status)]}>
               {@agent_status}
             </span>
-            <%= if @agent_status in [:idle, :stopping] do %>
+            <%= if @agent_status in [:idle, :stopping, :paused] do %>
               <button phx-click="start_research" class="px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-sm font-medium transition">▶ Start</button>
             <% else %>
               <button phx-click="stop_research" class="px-4 py-2 bg-red-600 hover:bg-red-500 text-white rounded-lg text-sm font-medium transition">⏹ Stop</button>
@@ -193,21 +242,28 @@ defmodule ExAutoresearchWeb.DashboardLive do
 
         <%!-- Stats --%>
         <div class="grid grid-cols-5 gap-4">
-          <.stat label="Versions" value={@experiment_count} />
+          <.stat label="Trials" value={@trial_count} />
           <.stat label="Best Loss" value={safe_fmt(@best_loss)} />
-          <.stat label="Best Version" value={@best_version && "v_#{@best_version}" || "—"} />
-          <.stat label="Current Step" value={@current_step || "—"} />
-          <.stat label="Progress" value={@current_progress && "#{@current_progress}%" || "—"} />
+          <.stat label="Best Trial" value={@best_version && "v_#{@best_version}" || "-"} />
+          <.stat label="Current Step" value={@current_step || "-"} />
+          <.stat label="Progress" value={@current_progress && "#{@current_progress}%" || "-"} />
         </div>
 
-        <%!-- Row 1: experiments + agent log --%>
+        <%!-- Chart --%>
+        <div class="bg-zinc-900 rounded-xl border border-zinc-800 p-4">
+          <h2 class="text-lg font-semibold text-zinc-200 mb-2">📈 Loss over Trials</h2>
+          <div id="loss-chart" phx-hook="Chart" phx-update="ignore" style="width:100%; height:250px;"></div>
+        </div>
+
+        <%!-- Trials + Agent log --%>
         <div class="grid grid-cols-5 gap-5">
           <div class="col-span-3 bg-zinc-900 rounded-xl border border-zinc-800 p-4">
-            <h2 class="text-lg font-semibold text-zinc-200 mb-3">📊 Experiments</h2>
-            <div class="overflow-y-auto max-h-[24rem]">
+            <h2 class="text-lg font-semibold text-zinc-200 mb-3">📊 Trials</h2>
+            <div class="overflow-y-auto max-h-[22rem]">
               <table class="w-full text-sm">
                 <thead>
                   <tr class="text-zinc-500 border-b border-zinc-800">
+                    <th class="text-left py-1.5 px-2">Time</th>
                     <th class="text-left py-1.5 px-2">Version</th>
                     <th class="text-left py-1.5 px-2">Loss</th>
                     <th class="text-right py-1.5 px-2">Steps</th>
@@ -215,34 +271,35 @@ defmodule ExAutoresearchWeb.DashboardLive do
                     <th class="text-center py-1.5 px-2"></th>
                   </tr>
                 </thead>
-                <tbody id="experiments" phx-update="stream">
-                  <tr :for={{dom_id, exp} <- @streams.experiments} id={dom_id}
-                    phx-click="select_version" phx-value-version={exp[:version_id]}
+                <tbody id="trials" phx-update="stream">
+                  <tr :for={{dom_id, t} <- @streams.trials} id={dom_id}
+                    phx-click="select_version" phx-value-version={t[:version_id]}
                     class={[
                       "border-b border-zinc-800/50 cursor-pointer transition hover:bg-zinc-800/40",
-                      exp[:kept] && "bg-emerald-950/20",
-                      @selected && @selected[:version_id] == exp[:version_id] && "ring-1 ring-indigo-500 bg-indigo-950/20"
+                      t[:kept] && "bg-emerald-950/20",
+                      @selected && @selected[:version_id] == t[:version_id] && "ring-1 ring-indigo-500 bg-indigo-950/20"
                     ]}>
+                    <td class="py-1.5 px-2 text-xs text-zinc-500 font-mono">{fmt_time(t[:timestamp])}</td>
                     <td class="py-1.5 px-2">
-                      <div class="font-mono text-xs text-zinc-400">{"v_#{exp[:version_id] || "?"}"}</div>
-                      <div class="text-xs text-zinc-500 truncate max-w-[14rem]">{exp[:description] || ""}</div>
+                      <div class="font-mono text-xs text-zinc-400">{"v_#{t[:version_id] || "?"}"}</div>
+                      <div class="text-xs text-zinc-500 truncate max-w-[12rem]">{t[:description] || ""}</div>
                     </td>
-                    <td class="py-1.5 px-2 font-mono text-zinc-300 text-sm">{safe_fmt(exp[:loss])}</td>
-                    <td class="py-1.5 px-2 text-right text-zinc-500 text-xs">{exp[:steps] || "—"}</td>
-                    <td class="py-1.5 px-2 text-xs text-zinc-500">{short_model(exp[:model])}</td>
+                    <td class="py-1.5 px-2 font-mono text-zinc-300 text-sm">{safe_fmt(t[:loss])}</td>
+                    <td class="py-1.5 px-2 text-right text-zinc-500 text-xs">{t[:steps] || "-"}</td>
+                    <td class="py-1.5 px-2 text-xs text-zinc-500">{short_model(t[:model])}</td>
                     <td class="py-1.5 px-2 text-center">
-                      {if exp[:kept], do: "✅", else: if(exp[:status] == :crashed, do: "💥", else: "❌")}
+                      {if t[:kept], do: "✅", else: if(t[:status] == :crashed, do: "💥", else: "❌")}
                     </td>
                   </tr>
                 </tbody>
               </table>
-              <div class="hidden only:block text-zinc-600 text-center py-8">No experiments yet.</div>
+              <div class="hidden only:block text-zinc-600 text-center py-8">No trials yet. Hit ▶ Start.</div>
             </div>
           </div>
 
           <div class="col-span-2 bg-zinc-900 rounded-xl border border-zinc-800 p-4">
             <h2 class="text-lg font-semibold text-zinc-200 mb-3">🤖 Agent Log</h2>
-            <div class="overflow-y-auto max-h-[24rem] space-y-1">
+            <div class="overflow-y-auto max-h-[22rem] space-y-1">
               <%= if @agent_log == [] do %>
                 <p class="text-zinc-600 text-center py-8">Waiting for agent activity...</p>
               <% else %>
@@ -252,14 +309,15 @@ defmodule ExAutoresearchWeb.DashboardLive do
           </div>
         </div>
 
-        <%!-- Row 2: code viewer --%>
+        <%!-- Code viewer --%>
         <div class="bg-zinc-900 rounded-xl border border-zinc-800 p-4">
           <div class="flex items-center justify-between mb-3">
-            <h2 class="text-lg font-semibold text-zinc-200">📝 Module Source</h2>
+            <h2 class="text-lg font-semibold text-zinc-200">📝 Trial Source Code</h2>
             <div class="flex items-center gap-3">
               <%= if @selected do %>
                 <span class="font-mono text-sm text-indigo-400">v_{@selected[:version_id]}</span>
                 <span class="text-xs text-zinc-500">loss: {safe_fmt(@selected[:loss])}</span>
+                <span class="text-xs text-zinc-500">{short_model(@selected[:model])}</span>
                 <span class={[
                   "text-xs px-1.5 py-0.5 rounded",
                   if(@selected[:kept], do: "bg-emerald-900/50 text-emerald-400", else: "bg-zinc-800 text-zinc-500")
@@ -274,11 +332,11 @@ defmodule ExAutoresearchWeb.DashboardLive do
           </div>
           <%= if @selected do %>
             <div class="text-xs text-zinc-500 mb-2 italic">{@selected[:description]}</div>
-            <div class="overflow-y-auto max-h-[28rem] bg-zinc-950 rounded-lg p-3 border border-zinc-800">
+            <div class="overflow-y-auto max-h-[24rem] bg-zinc-950 rounded-lg p-3 border border-zinc-800">
               <pre class="text-xs font-mono text-zinc-300 whitespace-pre-wrap"><%= @selected[:code] %></pre>
             </div>
           <% else %>
-            <div class="text-zinc-600 text-center py-12">Click an experiment to view its source code</div>
+            <div class="text-zinc-600 text-center py-12">Click a trial or chart data point to view source code</div>
           <% end %>
         </div>
       </div>
@@ -288,6 +346,7 @@ defmodule ExAutoresearchWeb.DashboardLive do
 
   defp status_class(:running), do: "bg-emerald-900 text-emerald-300"
   defp status_class(:stopping), do: "bg-amber-900 text-amber-300"
+  defp status_class(:paused), do: "bg-blue-900 text-blue-300"
   defp status_class(_), do: "bg-zinc-800 text-zinc-400"
 
   attr :label, :string, required: true

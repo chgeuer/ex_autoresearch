@@ -14,7 +14,7 @@ defmodule ExAutoresearch.Agent.Researcher do
   alias ExAutoresearch.Experiments.{Registry, Loader, Runner}
   alias ExAutoresearch.Agent.{LLM, Prompts}
 
-  defstruct [:run_id, :task, status: :idle]
+  defstruct [:campaign_id, :task, status: :idle]
 
   # Client API
 
@@ -40,27 +40,27 @@ defmodule ExAutoresearch.Agent.Researcher do
   @doc "Get current status (reads from SQLite, never blocks)."
   def status do
     case Registry.active_run() do
-      {:ok, nil} -> %{status: :idle, experiment_count: 0, best_loss: nil, best_version: nil, model: "claude-sonnet-4", run_tag: nil}
+      {:ok, nil} -> %{status: :idle, trial_count: 0, best_loss: nil, best_version: nil, model: "claude-sonnet-4", campaign_tag: nil}
       {:ok, run} ->
-        best = Registry.best_experiment(run.id)
+        best = Registry.best_trial(run.id)
         %{
           status: run.status,
-          run_tag: run.tag,
-          experiment_count: Registry.count_experiments(run.id),
+          campaign_tag: run.tag,
+          trial_count: Registry.count_trials(run.id),
           best_loss: best && best.final_loss,
           best_version: best && best.version_id,
           model: run.model
         }
     end
   rescue
-    _ -> %{status: :idle, experiment_count: 0, best_loss: nil, best_version: nil, model: "claude-sonnet-4", run_tag: nil}
+    _ -> %{status: :idle, trial_count: 0, best_loss: nil, best_version: nil, model: "claude-sonnet-4", campaign_tag: nil}
   end
 
   @doc "Get all experiments for the active run."
   def experiments do
     case Registry.active_run() do
       {:ok, nil} -> []
-      {:ok, run} -> Registry.all_experiments(run.id)
+      {:ok, run} -> Registry.all_trials(run.id)
     end
   rescue
     _ -> []
@@ -80,28 +80,28 @@ defmodule ExAutoresearch.Agent.Researcher do
     time_budget = Keyword.get(opts, :time_budget, 15)
 
     # Resume existing run or create new one
-    run = case Registry.get_run(tag) do
+    run = case Registry.get_campaign(tag) do
       {:ok, nil} ->
         Logger.info("Creating new run: #{tag}")
-        Registry.start_run(tag, model: model, time_budget: time_budget)
+        Registry.start_campaign(tag, model: model, time_budget: time_budget)
       {:ok, existing} ->
-        Logger.info("Resuming run: #{tag} (#{Registry.count_experiments(existing.id)} experiments)")
-        Registry.resume_run(existing)
+        Logger.info("Resuming run: #{tag} (#{Registry.count_trials(existing.id)} experiments)")
+        Registry.resume_campaign(existing)
     end
 
     broadcast(:status_changed, %{status: :running})
 
     task = Task.async(fn -> experiment_loop(run) end)
-    {:noreply, %{state | run_id: run.id, task: task, status: :running}}
+    {:noreply, %{state | campaign_id: run.id, task: task, status: :running}}
   end
 
   @impl true
   def handle_cast(:stop_research, state) do
     Logger.info("Stop requested — will stop after current experiment")
 
-    if state.run_id do
-      case Registry.get_run_by_id(state.run_id) do
-        {:ok, run} when not is_nil(run) -> Registry.pause_run(run)
+    if state.campaign_id do
+      case Registry.get_run_by_id(state.campaign_id) do
+        {:ok, run} when not is_nil(run) -> Registry.pause_campaign(run)
         _ -> :ok
       end
     end
@@ -113,9 +113,9 @@ defmodule ExAutoresearch.Agent.Researcher do
   def handle_cast({:set_model, model_id}, state) do
     Logger.info("Switching model to: #{model_id}")
 
-    if state.run_id do
-      case Registry.get_run_by_id(state.run_id) do
-        {:ok, run} when not is_nil(run) -> Registry.update_run_model(run, model_id)
+    if state.campaign_id do
+      case Registry.get_run_by_id(state.campaign_id) do
+        {:ok, run} when not is_nil(run) -> Registry.update_campaign_model(run, model_id)
         _ -> :ok
       end
     end
@@ -145,7 +145,7 @@ defmodule ExAutoresearch.Agent.Researcher do
 
   defp experiment_loop(run) do
     # Run baseline if no experiments yet
-    if Registry.count_experiments(run.id) == 0 do
+    if Registry.count_trials(run.id) == 0 do
       Logger.info("[#{run.tag}] Running baseline...")
       run_baseline(run)
     end
@@ -155,7 +155,7 @@ defmodule ExAutoresearch.Agent.Researcher do
 
   defp loop(run) do
     # Re-read run from DB to get latest status/model (may have been changed mid-flight)
-    run = Ash.get!(ExAutoresearch.Research.Run, run.id)
+    run = Ash.get!(ExAutoresearch.Research.Campaign, run.id)
 
     if run.status == :running do
       case propose_and_run(run) do
@@ -185,8 +185,8 @@ defmodule ExAutoresearch.Agent.Researcher do
       {:ok, module} ->
         Registry.cache_module(version_id, module)
 
-        experiment = Registry.record_experiment(%{
-          run_id: run.id,
+        experiment = Registry.record_trial(%{
+          campaign_id: run.id,
           version_id: version_id,
           code: code,
           description: "baseline",
@@ -194,11 +194,11 @@ defmodule ExAutoresearch.Agent.Researcher do
           status: :running
         })
 
-        broadcast(:experiment_started, %{version_id: version_id, description: "baseline"})
+        broadcast(:trial_started, %{version_id: version_id, description: "baseline"})
 
         result = Runner.run(module, version_id: version_id, time_budget: run.time_budget)
 
-        experiment = Registry.complete_experiment(experiment, %{
+        experiment = Registry.complete_trial(experiment, %{
           final_loss: result[:loss],
           num_steps: result[:steps],
           training_seconds: result[:training_seconds],
@@ -206,9 +206,9 @@ defmodule ExAutoresearch.Agent.Researcher do
           kept: result[:loss] != nil
         })
 
-        if result[:loss], do: Registry.update_run_best(run, experiment.id)
+        if result[:loss], do: Registry.update_campaign_best(run, experiment.id)
 
-        broadcast(:experiment_completed, Map.merge(result, %{
+        broadcast(:trial_completed, Map.merge(result, %{
           description: "baseline", kept: result[:loss] != nil, model: run.model
         }))
 
@@ -219,9 +219,9 @@ defmodule ExAutoresearch.Agent.Researcher do
 
   defp propose_and_run(run) do
     version_id = gen_id()
-    all_exps = Registry.all_experiments(run.id)
-    best = Registry.best_experiment(run.id)
-    kept = Registry.kept_experiments(run.id)
+    all_exps = Registry.all_trials(run.id)
+    best = Registry.best_trial(run.id)
+    kept = Registry.kept_trials(run.id)
 
     # Build prompt with full context
     prompt = Prompts.build_proposal_prompt(all_exps, best, kept, version_id)
@@ -240,8 +240,8 @@ defmodule ExAutoresearch.Agent.Researcher do
           {:ok, module} ->
             Registry.cache_module(version_id, module)
 
-            experiment = Registry.record_experiment(%{
-              run_id: run.id,
+            experiment = Registry.record_trial(%{
+              campaign_id: run.id,
               version_id: version_id,
               code: code,
               description: description,
@@ -251,13 +251,13 @@ defmodule ExAutoresearch.Agent.Researcher do
               status: :running
             })
 
-            broadcast(:experiment_started, %{version_id: version_id, description: description})
+            broadcast(:trial_started, %{version_id: version_id, description: description})
 
             result = Runner.run(module, version_id: version_id, time_budget: run.time_budget)
 
             kept = decide_keep(result[:loss], best && best.final_loss)
 
-            experiment = Registry.complete_experiment(experiment, %{
+            experiment = Registry.complete_trial(experiment, %{
               final_loss: result[:loss],
               num_steps: result[:steps],
               training_seconds: result[:training_seconds],
@@ -265,9 +265,9 @@ defmodule ExAutoresearch.Agent.Researcher do
               kept: kept
             })
 
-            if kept, do: Registry.update_run_best(run, experiment.id)
+            if kept, do: Registry.update_campaign_best(run, experiment.id)
 
-            broadcast(:experiment_completed, Map.merge(result, %{
+            broadcast(:trial_completed, Map.merge(result, %{
               description: description, kept: kept, model: run.model
             }))
 
@@ -276,8 +276,8 @@ defmodule ExAutoresearch.Agent.Researcher do
           {:error, reason} ->
             Logger.error("Module v_#{version_id} failed to load: #{inspect(reason)}")
 
-            Registry.record_experiment(%{
-              run_id: run.id,
+            Registry.record_trial(%{
+              campaign_id: run.id,
               version_id: version_id,
               code: code,
               description: description,
@@ -288,7 +288,7 @@ defmodule ExAutoresearch.Agent.Researcher do
               error: inspect(reason)
             })
 
-            broadcast(:experiment_completed, %{
+            broadcast(:trial_completed, %{
               version_id: version_id, description: description,
               kept: false, status: :crashed, loss: nil, steps: 0,
               model: run.model, error: inspect(reason)
