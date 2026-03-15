@@ -275,7 +275,9 @@ defmodule ExAutoresearch.Experiments.Runner do
     }
   rescue
     e ->
-      Logger.error("[#{version_id}] Training crashed: #{Exception.message(e)}")
+      stacktrace = __STACKTRACE__ |> Exception.format_stacktrace() |> String.slice(0, 2000)
+      error_detail = "#{Exception.message(e)}\n#{stacktrace}"
+      Logger.error("[#{version_id}] Training crashed: #{error_detail}")
 
       %{
         version_id: version_id,
@@ -283,7 +285,7 @@ defmodule ExAutoresearch.Experiments.Runner do
         loss: nil,
         steps: 0,
         training_seconds: 0,
-        error: Exception.message(e),
+        error: error_detail,
         loss_history: []
       }
   end

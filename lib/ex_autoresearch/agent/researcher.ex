@@ -406,9 +406,25 @@ defmodule ExAutoresearch.Agent.Researcher do
     kept = Registry.kept_trials(run.id)
     effective_budget = effective_time_budget(run, length(kept))
 
-    # Build prompt with full context
+    # Build prompt with full context + diversity hint for parallel loops
     prompt = Prompts.build_proposal_prompt(all_exps, best, kept, version_id)
-    full_prompt = "#{Prompts.system_prompt()}\n\n---\n\n#{prompt}"
+
+    # Check what other loops are currently running to avoid duplicate proposals
+    other_running =
+      all_exps
+      |> Enum.filter(&(&1.status == :running and &1.version_id != version_id))
+      |> Enum.map(& &1.description)
+
+    diversity_hint =
+      if other_running != [] do
+        descs = Enum.join(other_running, ", ")
+        "\n\n**IMPORTANT**: Another GPU is currently running: #{descs}. " <>
+        "You MUST try a DIFFERENT approach — do not duplicate that experiment.\n"
+      else
+        ""
+      end
+
+    full_prompt = "#{Prompts.system_prompt()}\n\n---\n\n#{prompt}#{diversity_hint}"
 
     Logger.info("[#{label}] Asking #{run.model} for experiment v_#{version_id}...")
     broadcast(:agent_thinking, %{version_id: version_id})
@@ -492,6 +508,7 @@ defmodule ExAutoresearch.Agent.Researcher do
               training_seconds: result[:training_seconds],
               status: trial_status,
               kept: kept,
+              error: result[:error],
               loss_history: Jason.encode!(result[:loss_history] || [])
             })
 
