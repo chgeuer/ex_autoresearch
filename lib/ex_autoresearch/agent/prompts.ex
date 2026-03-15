@@ -6,6 +6,7 @@ defmodule ExAutoresearch.Agent.Prompts do
   """
 
   @prompts_dir "priv/prompts"
+  @pitfalls_path Path.join(@prompts_dir, "pitfalls.md")
 
   def read(filename) do
     path = Path.join([@prompts_dir, filename])
@@ -16,8 +17,87 @@ defmodule ExAutoresearch.Agent.Prompts do
     end
   end
 
+  @doc """
+  Distill crash patterns from trial history into pitfalls.md.
+
+  Groups crashes by error pattern, deduplicates, and writes a concise
+  list of "do NOT do this" rules that the LLM sees in every prompt.
+  """
+  def distill_pitfalls(campaign_id) do
+    alias ExAutoresearch.Experiments.Registry
+
+    crashed =
+      Registry.all_trials(campaign_id)
+      |> Enum.filter(&(&1.status == :crashed and &1.error != nil and &1.error != ""))
+
+    if crashed == [] do
+      :ok
+    else
+      patterns = extract_patterns(crashed)
+
+      content = """
+      ## Known Pitfalls — DO NOT repeat these mistakes
+
+      The following patterns have caused crashes in this campaign. Avoid them.
+
+      #{Enum.map_join(patterns, "\n", fn {pattern, examples} ->
+        count = length(examples)
+        example = hd(examples)
+        "- **#{pattern}** (#{count} crash#{if count > 1, do: "es"}):\n  #{example}\n"
+      end)}
+      """
+
+      File.write!(@pitfalls_path, content)
+    end
+  end
+
+  defp extract_patterns(crashed_trials) do
+    crashed_trials
+    |> Enum.map(fn t ->
+      error = t.error || ""
+      pattern = classify_error(error)
+      example = String.slice(error, 0, 200) |> String.replace("\n", " ")
+      {pattern, example}
+    end)
+    |> Enum.group_by(&elem(&1, 0), &elem(&1, 1))
+    |> Enum.sort_by(fn {_, examples} -> -length(examples) end)
+    |> Enum.take(10)
+  end
+
+  defp classify_error(error) do
+    cond do
+      error =~ "Axon.embedding" and error =~ "computed" ->
+        "Axon.embedding on computed input (use Axon.nx with Nx.take instead)"
+
+      error =~ "Axon.nx" and error =~ "compiling layer" ->
+        "Invalid operation inside Axon.nx callback (shape/type error at JIT time)"
+
+      error =~ "shape" or error =~ "Shape" ->
+        "Tensor shape mismatch"
+
+      error =~ "ArgumentError" or error =~ "argument error" ->
+        "ArgumentError (likely invalid Nx/Axon operation)"
+
+      error =~ "CompileError" or error =~ "undefined function" ->
+        "Compilation error (undefined function or bad syntax)"
+
+      error =~ "ArithmeticError" or error =~ "NaN" or error =~ "nan" ->
+        "Numerical instability (NaN/Inf — check learning rate and loss function)"
+
+      error =~ "out of memory" or error =~ "OOM" ->
+        "Out of GPU memory (reduce batch_size or model dimensions)"
+
+      error =~ "FunctionClauseError" ->
+        "FunctionClauseError (wrong argument types to Nx/Axon function)"
+
+      true ->
+        "Other crash"
+    end
+  end
+
   def system_prompt do
-    [read("system.md"), read("strategy.md"), read("constraints.md")]
+    [read("system.md"), read("strategy.md"), read("constraints.md"), read("pitfalls.md")]
+    |> Enum.reject(&(&1 =~ "not found"))
     |> Enum.join("\n\n")
   end
 

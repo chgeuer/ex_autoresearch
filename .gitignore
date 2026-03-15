@@ -44,3 +44,4 @@ run.log
 .dev_node.log
 .dev_node.pid
 
+priv/prompts/pitfalls.md

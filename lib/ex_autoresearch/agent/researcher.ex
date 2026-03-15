@@ -556,12 +556,16 @@ defmodule ExAutoresearch.Agent.Researcher do
           status: :crashed, loss: nil, steps: 0, model: run.model, gpu: label, error: error_msg
         })
 
+        Prompts.distill_pitfalls(run.id)
         :ok
     end
   end
 
   defp ask_llm_to_fix(run, label, target_node, llm_pid, _old_version_id, old_code, error_msg, best, effective_budget, fix_attempt) do
     new_version_id = gen_id()
+
+    # Update pitfalls.md so the fix prompt includes the latest crash patterns
+    Prompts.distill_pitfalls(run.id)
 
     fix_prompt = """
     #{Prompts.system_prompt()}
