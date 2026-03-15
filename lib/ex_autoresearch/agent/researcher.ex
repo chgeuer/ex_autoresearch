@@ -546,17 +546,21 @@ defmodule ExAutoresearch.Agent.Researcher do
   end
 
   # Adaptive time budget: starts at time_budget, doubles per kept trial, caps at max_time_budget.
+  # When step_budget is set, time budget is just a safety timeout (24h).
   # When max_time_budget is nil, uses time_budget as fixed value.
   defp effective_time_budget(run, kept_count) do
-    case run.max_time_budget do
-      nil ->
-        run.time_budget
+    if run.step_budget do
+      # Step-based mode: time is not the limiting factor
+      86_400
+    else
+      case run.max_time_budget do
+        nil ->
+          run.time_budget
 
-      max when is_integer(max) ->
-        budget = run.time_budget * Integer.pow(2, kept_count)
-        budget = min(budget, max)
-        Logger.info("[#{run.tag}] Adaptive time budget: #{budget}s (#{kept_count} kept, range #{run.time_budget}–#{max}s)")
-        budget
+        max when is_integer(max) ->
+          budget = run.time_budget * Integer.pow(2, kept_count)
+          min(budget, max)
+      end
     end
   end
 
