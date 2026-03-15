@@ -274,12 +274,6 @@ defmodule ExAutoresearch.Agent.Researcher do
         :ok ->
           gpu_loop(run, label, target_node, 0)
 
-        {:error, {:not_ready, _}} ->
-          # LLM is busy with another loop's request — wait and retry
-          Logger.debug("[#{label}] LLM busy, retrying in 5s...")
-          Process.sleep(5_000)
-          gpu_loop(run, label, target_node, consecutive_errors)
-
         {:error, reason} ->
           errors = consecutive_errors + 1
           Logger.error("[#{label}] Failed (#{errors}/#{@max_consecutive_errors}): #{inspect(reason, limit: 3)}")
@@ -367,7 +361,7 @@ defmodule ExAutoresearch.Agent.Researcher do
     Logger.info("[#{label}] Asking #{run.model} for experiment v_#{version_id}...")
     broadcast(:agent_thinking, %{version_id: version_id})
 
-    case LLM.prompt(prompt, system: Prompts.system_prompt(), model: run.model) do
+    case prompt_with_retry(prompt, run.model, label) do
       {:ok, response} ->
         {code, description, reasoning} = parse_response(response, version_id)
         broadcast(:agent_responded, %{reasoning: reasoning, description: description})
@@ -511,6 +505,20 @@ defmodule ExAutoresearch.Agent.Researcher do
       end
 
     {code, description, reasoning}
+  end
+
+  # Retry LLM prompt when the backend is busy (single-process LLM serving
+  # multiple GPU loops). Waits 5s between retries to let the other loop finish.
+  defp prompt_with_retry(prompt, model, label, attempts \\ 0) do
+    case LLM.prompt(prompt, system: Prompts.system_prompt(), model: model) do
+      {:error, {:not_ready, _}} ->
+        Logger.debug("[#{label}] LLM busy, waiting 5s... (attempt #{attempts + 1})")
+        Process.sleep(5_000)
+        prompt_with_retry(prompt, model, label, attempts + 1)
+
+      result ->
+        result
+    end
   end
 
   defp decide_keep(nil, _baseline), do: false
