@@ -33,6 +33,7 @@ case "${1:-help}" in
 
   stop)
     # Stop CUDA worker first (if running), then main node — all via RPC
+    stopped=0
     for NODE_FQDN in "$CUDA_FQDN" "$FQDN"; do
       NODE_SNAME="${NODE_FQDN%%@*}"
       if epmd -names 2>/dev/null | grep -q "name ${NODE_SNAME} "; then
@@ -50,9 +51,14 @@ case "${1:-help}" in
           epmd -names 2>/dev/null | grep -q "name ${NODE_SNAME} " || break
           sleep 1
         done
+        stopped=$((stopped + 1))
       fi
     done
-    echo "Stopped"
+    if [ "$stopped" -eq 0 ]; then
+      echo "No nodes were running"
+    else
+      echo "Stopped $stopped node(s)"
+    fi
     ;;
 
   status)
