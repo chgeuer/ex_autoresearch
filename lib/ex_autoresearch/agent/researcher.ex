@@ -19,6 +19,7 @@ defmodule ExAutoresearch.Agent.Researcher do
 
   alias ExAutoresearch.Experiments.{Registry, Loader, Runner}
   alias ExAutoresearch.Agent.{LLM, Prompts}
+  alias ExAutoresearch.Agent.LLM.CopilotBackend
 
   defstruct [:campaign_id, :task, status: :idle]
 
@@ -265,14 +266,27 @@ defmodule ExAutoresearch.Agent.Researcher do
     [local | workers]
   end
 
-  # Independent loop for one GPU node. Runs until campaign is paused/stopped.
-  defp gpu_loop(run, label, target_node, consecutive_errors \\ 0) do
+  # Independent loop for one GPU node. Each loop has its own Copilot
+  # session so LLM calls run in parallel across GPU loops.
+  defp gpu_loop(run, label, target_node, consecutive_errors \\ 0, llm_pid \\ nil) do
+    # Start a dedicated Copilot backend for this loop (once)
+    llm_pid =
+      if llm_pid && Process.alive?(llm_pid) do
+        llm_pid
+      else
+        Logger.info("[#{label}] Starting dedicated Copilot session")
+        {:ok, pid} = CopilotBackend.start_link(model: run.model)
+        # Give it time to connect
+        Process.sleep(2_000)
+        pid
+      end
+
     run = Ash.get!(ExAutoresearch.Research.Campaign, run.id)
 
     if run.status == :running do
-      case propose_and_run(run, label, target_node) do
+      case propose_and_run(run, label, target_node, llm_pid) do
         :ok ->
-          gpu_loop(run, label, target_node, 0)
+          gpu_loop(run, label, target_node, 0, llm_pid)
 
         {:error, reason} ->
           errors = consecutive_errors + 1
@@ -284,11 +298,12 @@ defmodule ExAutoresearch.Agent.Researcher do
           else
             backoff = min(3_000 * errors, 15_000)
             Process.sleep(backoff)
-            gpu_loop(run, label, target_node, errors)
+            gpu_loop(run, label, target_node, errors, llm_pid)
           end
       end
     else
       Logger.info("[#{label}] GPU loop stopped")
+      if llm_pid, do: GenServer.stop(llm_pid, :normal)
     end
   end
 
@@ -348,7 +363,7 @@ defmodule ExAutoresearch.Agent.Researcher do
     end
   end
 
-  defp propose_and_run(run, label, target_node) do
+  defp propose_and_run(run, label, target_node, llm_pid) do
     version_id = gen_id()
     all_exps = Registry.all_trials(run.id)
     best = Registry.best_trial(run.id)
@@ -357,11 +372,12 @@ defmodule ExAutoresearch.Agent.Researcher do
 
     # Build prompt with full context
     prompt = Prompts.build_proposal_prompt(all_exps, best, kept, version_id)
+    full_prompt = "#{Prompts.system_prompt()}\n\n---\n\n#{prompt}"
 
     Logger.info("[#{label}] Asking #{run.model} for experiment v_#{version_id}...")
     broadcast(:agent_thinking, %{version_id: version_id})
 
-    case LLM.prompt(prompt, system: Prompts.system_prompt(), model: run.model) do
+    case GenServer.call(llm_pid, {:prompt, full_prompt, run.model}, :timer.minutes(5)) do
       {:ok, response} ->
         {code, description, reasoning} = parse_response(response, version_id)
         broadcast(:agent_responded, %{reasoning: reasoning, description: description})
