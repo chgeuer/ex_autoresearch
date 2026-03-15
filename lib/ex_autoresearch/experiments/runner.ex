@@ -196,7 +196,7 @@ defmodule ExAutoresearch.Experiments.Runner do
           true -> false
         end
 
-      if halt?, do: {:halt_loop, state}, else: {:continue, state}
+      if halt?, do: {:halt_epoch, state}, else: {:continue, state}
     end
 
     progress_handler = fn state ->
