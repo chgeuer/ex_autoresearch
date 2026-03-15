@@ -49,8 +49,7 @@ defmodule ExAutoresearchWeb.DashboardLive do
       |> assign(:new_campaign_tag, default_tag())
       |> assign(:time_budget, 300)
       |> assign(:step_budget, nil)
-      |> assign(:current_step, nil)
-      |> assign(:current_progress, nil)
+      |> assign(:active_trials, %{})
       |> assign(:live_curves, %{})
       |> assign(:agent_log, [])
       |> assign(:selected, selected)
@@ -247,10 +246,11 @@ defmodule ExAutoresearchWeb.DashboardLive do
     vid = p[:version_id]
     gpu = p[:gpu] || "local"
 
+    trial_info = %{version_id: vid, gpu: gpu, step: 0, progress: 0, loss: nil, description: p[:description]}
+
     {:noreply,
      socket
-     |> assign(:current_step, 0)
-     |> assign(:current_progress, 0)
+     |> update(:active_trials, &Map.put(&1, vid, trial_info))
      |> update(:live_curves, &Map.put(&1, vid, []))
      |> push_live_chart()
      |> add_log("🧪 Started: #{p[:description]} (v_#{vid}) on #{gpu}")}
@@ -268,8 +268,7 @@ defmodule ExAutoresearchWeb.DashboardLive do
     socket =
       socket
       |> stream_insert(:trials, entry, at: 0)
-      |> assign(:current_step, nil)
-      |> assign(:current_progress, nil)
+      |> update(:active_trials, &Map.delete(&1, r[:version_id]))
       |> update(:live_curves, &Map.delete(&1, r[:version_id]))
       |> assign(:chart_trials, chart_trials)
       |> add_log("#{tag} v_#{r[:version_id]} loss=#{safe_fmt(r[:loss])} — #{r[:description]} [#{gpu}]")
@@ -286,7 +285,14 @@ defmodule ExAutoresearchWeb.DashboardLive do
     loss = p[:loss]
     vid = p[:version_id]
 
-    socket = socket |> assign(:current_step, step) |> assign(:current_progress, p[:progress])
+    # Update the active trial's step/progress/loss
+    socket =
+      update(socket, :active_trials, fn trials ->
+        case Map.get(trials, vid) do
+          nil -> trials
+          info -> Map.put(trials, vid, %{info | step: step, progress: p[:progress], loss: loss})
+        end
+      end)
 
     if loss && step && vid && rem(step, 50) == 0 do
       live_curves =
@@ -699,13 +705,46 @@ defmodule ExAutoresearchWeb.DashboardLive do
         </div>
 
         <%!-- Stats --%>
-        <div class="grid grid-cols-5 gap-4">
+        <div class="grid grid-cols-3 gap-4">
           <.stat label="Trials" value={@trial_count} />
           <.stat label="Best Loss" value={safe_fmt(@best_loss)} />
           <.stat label="Best Trial" value={(@best_version && "v_#{@best_version}") || "-"} />
-          <.stat label="Current Step" value={@current_step || "-"} />
-          <.stat label="Progress" value={(@current_progress && "#{@current_progress}%") || "-"} />
         </div>
+
+        <%!-- Active Trials --%>
+        <%= if @active_trials != %{} do %>
+          <div class="bg-zinc-900 rounded-xl border border-zinc-800 p-3">
+            <h3 class="text-sm font-semibold text-zinc-400 mb-2">🏃 In-Flight Trials</h3>
+            <table class="w-full text-xs">
+              <thead>
+                <tr class="text-zinc-500 border-b border-zinc-800">
+                  <th class="text-left py-1 px-2">Trial</th>
+                  <th class="text-left py-1 px-2">GPU</th>
+                  <th class="text-right py-1 px-2">Step</th>
+                  <th class="text-right py-1 px-2">Loss</th>
+                  <th class="text-left py-1 px-2">Progress</th>
+                  <th class="text-left py-1 px-2">Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                <%= for {_vid, t} <- Enum.sort_by(@active_trials, fn {vid, _} -> vid end) do %>
+                  <tr class="border-b border-zinc-800/30">
+                    <td class="py-1 px-2 font-mono text-zinc-400">{"v_#{t.version_id}"}</td>
+                    <td class="py-1 px-2 text-zinc-500">{short_gpu(t.gpu)}</td>
+                    <td class="py-1 px-2 text-right text-zinc-300 font-mono">{t.step || 0}</td>
+                    <td class="py-1 px-2 text-right text-zinc-300 font-mono">{safe_fmt(t.loss)}</td>
+                    <td class="py-1 px-2">
+                      <div class="w-24 bg-zinc-800 rounded-full h-2">
+                        <div class="bg-indigo-500 h-2 rounded-full transition-all" style={"width: #{t.progress || 0}%"}></div>
+                      </div>
+                    </td>
+                    <td class="py-1 px-2 text-zinc-500 truncate max-w-[10rem]">{t.description}</td>
+                  </tr>
+                <% end %>
+              </tbody>
+            </table>
+          </div>
+        <% end %>
 
         <%!-- Charts --%>
         <div class="grid grid-cols-2 gap-5">
