@@ -13,7 +13,8 @@ defmodule ExAutoresearch.Experiments.Runner do
   @default_time_budget to_timeout(minute: 5) |> div(1000)
 
   @run_schema NimbleOptions.new!(
-                time_budget: [type: :pos_integer, default: @default_time_budget, doc: "Seconds per trial"],
+                time_budget: [type: :pos_integer, default: @default_time_budget, doc: "Max seconds (safety timeout)"],
+                step_budget: [type: {:or, [:pos_integer, {:in, [nil]}]}, default: nil, doc: "Stop after this many steps (nil = use time_budget)"],
                 version_id: [
                   type: :string,
                   default: "unknown",
@@ -38,11 +39,12 @@ defmodule ExAutoresearch.Experiments.Runner do
   def run(module, opts \\ []) do
     opts = NimbleOptions.validate!(opts, @run_schema)
     time_budget = opts[:time_budget]
+    step_budget = opts[:step_budget]
     version_id = opts[:version_id]
-    do_run(module, version_id, time_budget)
+    do_run(module, version_id, time_budget, step_budget)
   end
 
-  defp do_run(module, version_id, time_budget) do
+  defp do_run(module, version_id, time_budget, step_budget) do
     config = module.config()
     vocab_size = config[:vocab_size] || 256
     seq_len = config[:sequence_len] || config[:seq_len] || 32
@@ -76,14 +78,18 @@ defmodule ExAutoresearch.Experiments.Runner do
 
     time_budget_ms = time_budget * 1000
 
+    budget_label =
+      if step_budget, do: "#{step_budget} steps (max #{time_budget}s)", else: "#{time_budget}s"
+
     halt_handler = fn state ->
       unless Process.get(:training_start_time) do
         Process.put(:training_start_time, System.monotonic_time(:millisecond))
         Process.put(:training_steps, 0)
-        Logger.info("[#{version_id}] JIT warmup done, starting #{time_budget}s timer")
+        Logger.info("[#{version_id}] JIT warmup done, starting training: #{budget_label}")
       end
 
-      Process.put(:training_steps, (Process.get(:training_steps) || 0) + 1)
+      steps = (Process.get(:training_steps) || 0) + 1
+      Process.put(:training_steps, steps)
 
       case state.metrics do
         %{"loss" => %Nx.Tensor{} = loss} ->
@@ -97,7 +103,14 @@ defmodule ExAutoresearch.Experiments.Runner do
       start = Process.get(:training_start_time)
       elapsed = System.monotonic_time(:millisecond) - start
 
-      if elapsed >= time_budget_ms, do: {:halt_loop, state}, else: {:continue, state}
+      halt? =
+        cond do
+          step_budget && steps >= step_budget -> true
+          elapsed >= time_budget_ms -> true
+          true -> false
+        end
+
+      if halt?, do: {:halt_loop, state}, else: {:continue, state}
     end
 
     progress_handler = fn state ->
@@ -121,7 +134,7 @@ defmodule ExAutoresearch.Experiments.Runner do
                version_id: version_id,
                step: step,
                loss: loss,
-               progress: training_progress(time_budget_ms)
+               progress: training_progress(time_budget_ms, step_budget)
              }}
           )
         end
@@ -137,7 +150,7 @@ defmodule ExAutoresearch.Experiments.Runner do
       |> Axon.Loop.handle_event(:iteration_completed, progress_handler)
       |> Axon.Loop.handle_event(:iteration_completed, halt_handler)
 
-    Logger.info("[#{version_id}] Starting training (JIT warmup, then #{time_budget}s)")
+    Logger.info("[#{version_id}] Starting training (JIT warmup, then #{budget_label})")
 
     _final = Axon.Loop.run(loop, data, %{}, epochs: 1, iterations: 1_000_000)
 
@@ -175,14 +188,20 @@ defmodule ExAutoresearch.Experiments.Runner do
       }
   end
 
-  defp training_progress(time_budget_ms) do
-    case Process.get(:training_start_time) do
-      nil ->
-        0.0
+  defp training_progress(time_budget_ms, step_budget) do
+    steps = Process.get(:training_steps, 0)
 
-      start ->
-        elapsed = System.monotonic_time(:millisecond) - start
-        safe_round(min(elapsed / time_budget_ms, 1.0) * 100, 1)
+    if step_budget do
+      safe_round(min(steps / step_budget, 1.0) * 100, 1)
+    else
+      case Process.get(:training_start_time) do
+        nil ->
+          0.0
+
+        start ->
+          elapsed = System.monotonic_time(:millisecond) - start
+          safe_round(min(elapsed / time_budget_ms, 1.0) * 100, 1)
+      end
     end
   end
 

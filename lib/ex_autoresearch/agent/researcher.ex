@@ -39,6 +39,11 @@ defmodule ExAutoresearch.Agent.Researcher do
                              type: {:or, [:pos_integer, {:in, [nil]}]},
                              default: 300,
                              doc: "Max seconds per trial. Set nil to disable adaptive scaling."
+                           ],
+                           step_budget: [
+                             type: {:or, [:pos_integer, {:in, [nil]}]},
+                             default: nil,
+                             doc: "Fixed step count per trial. When set, overrides time-based budgets for fair cross-GPU comparison."
                            ]
                          )
 
@@ -146,6 +151,7 @@ defmodule ExAutoresearch.Agent.Researcher do
     model = opts[:model]
     time_budget = opts[:time_budget]
     max_time_budget = opts[:max_time_budget]
+    step_budget = opts[:step_budget]
 
     # Resume existing run or create new one
     run =
@@ -156,7 +162,8 @@ defmodule ExAutoresearch.Agent.Researcher do
           Registry.start_campaign(tag,
             model: model,
             time_budget: time_budget,
-            max_time_budget: max_time_budget
+            max_time_budget: max_time_budget,
+            step_budget: step_budget
           )
 
         {:ok, existing} ->
@@ -337,7 +344,7 @@ defmodule ExAutoresearch.Agent.Researcher do
 
         broadcast(:trial_started, %{version_id: version_id, description: "baseline"})
 
-        result = Runner.run(module, version_id: version_id, time_budget: effective_time_budget(run, 0))
+        result = Runner.run(module, version_id: version_id, time_budget: effective_time_budget(run, 0), step_budget: run.step_budget)
 
         experiment =
           Registry.complete_trial(experiment, %{
@@ -404,7 +411,7 @@ defmodule ExAutoresearch.Agent.Researcher do
 
             broadcast(:trial_started, %{version_id: version_id, description: description, gpu: label})
 
-            result = run_on_node(target_node, module, code, version_id, effective_budget)
+            result = run_on_node(target_node, module, code, version_id, effective_budget, run.step_budget)
 
             loss = sanitize_loss(result[:loss])
             kept = decide_keep(loss, best && best.final_loss)
@@ -470,11 +477,11 @@ defmodule ExAutoresearch.Agent.Researcher do
 
   # Execute training on the target node. Local node runs directly,
   # remote nodes get the code shipped via :rpc.call and compile+train there.
-  defp run_on_node(target_node, module, _code, version_id, time_budget) when target_node == node() do
-    Runner.run(module, version_id: version_id, time_budget: time_budget)
+  defp run_on_node(target_node, module, _code, version_id, time_budget, step_budget) when target_node == node() do
+    Runner.run(module, version_id: version_id, time_budget: time_budget, step_budget: step_budget)
   end
 
-  defp run_on_node(target_node, _module, code, version_id, time_budget) do
+  defp run_on_node(target_node, _module, code, version_id, time_budget, step_budget) do
     Logger.info("[#{version_id}] Dispatching to remote node #{target_node}")
 
     # Ship source code to the remote node: compile + train there
@@ -482,7 +489,7 @@ defmodule ExAutoresearch.Agent.Researcher do
       modules when is_list(modules) ->
         {remote_module, _bytecode} = List.last(modules)
 
-        case :rpc.call(target_node, Runner, :run, [remote_module, [version_id: version_id, time_budget: time_budget]], :infinity) do
+        case :rpc.call(target_node, Runner, :run, [remote_module, [version_id: version_id, time_budget: time_budget, step_budget: step_budget]], :infinity) do
           {:badrpc, reason} ->
             Logger.error("[#{version_id}] Remote training failed: #{inspect(reason, limit: 3)}")
             %{version_id: version_id, status: :crashed, loss: nil, steps: 0, training_seconds: 0, error: inspect(reason), loss_history: []}

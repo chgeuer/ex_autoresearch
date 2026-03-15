@@ -29,6 +29,7 @@ defmodule ExAutoresearch.Experiments.Registry do
     model = Keyword.get(opts, :model, "claude-sonnet-4")
     time_budget = Keyword.get(opts, :time_budget, 15)
     max_time_budget = Keyword.get(opts, :max_time_budget)
+    step_budget = Keyword.get(opts, :step_budget)
     base_config = Keyword.get(opts, :base_config, %{})
 
     Ash.create!(Campaign, %{
@@ -36,6 +37,7 @@ defmodule ExAutoresearch.Experiments.Registry do
       model: model,
       time_budget: time_budget,
       max_time_budget: max_time_budget,
+      step_budget: step_budget,
       base_config: base_config
     })
   end

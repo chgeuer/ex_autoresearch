@@ -20,7 +20,7 @@ defmodule ExAutoresearch.Research.Campaign do
     defaults [:read]
 
     create :start do
-      accept [:tag, :model, :time_budget, :max_time_budget, :base_config]
+      accept [:tag, :model, :time_budget, :max_time_budget, :step_budget, :base_config]
       primary? true
     end
 
@@ -45,6 +45,7 @@ defmodule ExAutoresearch.Research.Campaign do
     attribute :model, :string, default: "claude-sonnet-4"
     attribute :time_budget, :integer, default: 300
     attribute :max_time_budget, :integer
+    attribute :step_budget, :integer
     attribute :base_config, :map
     attribute :best_trial_id, :uuid_v7
 

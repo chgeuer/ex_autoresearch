@@ -81,7 +81,11 @@ defmodule ExAutoresearch.Model.Display do
 
     param_str = if params != [], do: "\\n#{Enum.join(params, ", ")}", else: ""
 
-    "#{name} (#{op})#{param_str}"
+    cond do
+      name == op -> "#{name}#{param_str}"
+      op == "fn" -> "#{name}#{param_str}"
+      true -> "#{name} (#{op})#{param_str}"
+    end
   rescue
     _ -> safe_str(node.op)
   end
@@ -89,18 +93,115 @@ defmodule ExAutoresearch.Model.Display do
   defp get_node_name(node) do
     result =
       case node.name do
-        f when is_function(f, 2) -> f.(:op_name, node.op_name)
-        name when is_binary(name) -> name
-        _ -> safe_str(node.op)
+        f when is_function(f, 2) ->
+          if is_function(node.op) do
+            # For function-based ops (e.g. Axon.nx), use the resolved function label
+            # instead of the generic generated name like "nx_0".
+            op_label = safe_str(node.op)
+
+            if op_label == "fn" and is_atom(node.op_name) do
+              Atom.to_string(node.op_name)
+            else
+              op_label
+            end
+          else
+            f.(:op_name, node.op_name)
+          end
+
+        name when is_binary(name) ->
+          name
+
+        _ ->
+          if is_atom(node.op_name), do: Atom.to_string(node.op_name), else: safe_str(node.op)
       end
 
     safe_str(result)
   rescue
-    _ -> safe_str(node.op)
+    _ ->
+      op_label = safe_str(node.op)
+
+      if op_label == "fn" and is_atom(node.op_name) do
+        Atom.to_string(node.op_name)
+      else
+        op_label
+      end
   end
 
   defp safe_str(v) when is_binary(v), do: v
   defp safe_str(v) when is_atom(v), do: Atom.to_string(v)
-  defp safe_str(v) when is_function(v), do: "fn"
+  defp safe_str(v) when is_function(v), do: function_label(v)
   defp safe_str(v), do: inspect(v)
+
+  defp function_label(fun) do
+    info = Function.info(fun)
+
+    case info[:type] do
+      :external ->
+        "#{inspect(info[:module])}.#{info[:name]}/#{info[:arity]}"
+
+      :local ->
+        case info[:env] do
+          [inner] when is_function(inner) ->
+            function_label(inner)
+
+          env ->
+            # First try AST extraction (works for eval'd/dynamically compiled code)
+            case extract_calls_from_env(env) do
+              [{mod, name}] ->
+                "#{inspect(mod)}.#{name}"
+
+              [_ | _] = pairs ->
+                pairs |> Enum.map(fn {m, f} -> "#{inspect(m)}.#{f}" end) |> Enum.join(", ")
+
+              [] ->
+                # For compiled closures, parse the Erlang fun name
+                # e.g. "-transformer_block/3-fun-0-" -> "transformer_block"
+                parse_closure_name(info[:name])
+            end
+        end
+    end
+  rescue
+    _ -> "fn"
+  end
+
+  defp parse_closure_name(name) when is_atom(name) do
+    case Atom.to_string(name) do
+      "-" <> rest ->
+        case String.split(rest, "/", parts: 2) do
+          [fun_name, _] -> fun_name
+          _ -> "fn"
+        end
+
+      _ ->
+        "fn"
+    end
+  end
+
+  defp parse_closure_name(_), do: "fn"
+
+  defp extract_calls_from_env(env) when is_list(env) do
+    env
+    |> Enum.flat_map(fn
+      f when is_function(f) ->
+        fi = Function.info(f)
+        extract_calls_from_env(fi[:env])
+
+      term ->
+        extract_remote_calls(term)
+    end)
+    |> Enum.uniq()
+    |> Enum.reject(fn {mod, _} -> mod in [Axon, Axon.Activations, :erlang] end)
+  end
+
+  defp extract_remote_calls(ast) when is_list(ast), do: Enum.flat_map(ast, &extract_remote_calls/1)
+
+  defp extract_remote_calls({:call, _, {:remote, _, {:atom, _, mod}, {:atom, _, fun}}, args}) do
+    [{mod, fun}] ++ extract_remote_calls(args)
+  end
+
+  defp extract_remote_calls(tuple) when is_tuple(tuple) do
+    tuple |> Tuple.to_list() |> extract_remote_calls()
+  end
+
+  defp extract_remote_calls(_), do: []
 end

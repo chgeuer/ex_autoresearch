@@ -48,6 +48,8 @@ defmodule ExAutoresearchWeb.DashboardLive do
       |> assign(:selected_campaign_id, selected_campaign_id)
       |> assign(:new_campaign_tag, default_tag())
       |> assign(:time_budget, 300)
+      |> assign(:step_budget, nil)
+      |> assign(:step_budget, nil)
       |> assign(:current_step, nil)
       |> assign(:current_progress, nil)
       |> assign(:live_curves, %{})
@@ -81,9 +83,10 @@ defmodule ExAutoresearchWeb.DashboardLive do
     backend = socket.assigns.current_backend
 
     time_budget = socket.assigns.time_budget
+    step_budget = socket.assigns.step_budget
 
     ExAutoresearch.Agent.LLM.set_backend(backend, model)
-    Researcher.start_research(tag: tag, model: model, time_budget: time_budget)
+    Researcher.start_research(tag: tag, model: model, time_budget: time_budget, step_budget: step_budget)
 
     # Refresh campaigns list (new campaign may have been created)
     campaigns = Registry.list_campaigns()
@@ -131,6 +134,7 @@ defmodule ExAutoresearchWeb.DashboardLive do
        |> assign(:best_version, best && best.version_id)
        |> assign(:trial_count, trial_count)
        |> assign(:time_budget, campaign.time_budget)
+       |> assign(:step_budget, campaign.step_budget)
        |> assign(:selected, selected)
        |> assign(:chart_trials, trials)
        |> stream(:trials, trials, reset: true)
@@ -178,6 +182,22 @@ defmodule ExAutoresearchWeb.DashboardLive do
   def handle_event("stop_research", _params, socket) do
     Researcher.stop_research()
     {:noreply, assign(socket, :agent_status, :stopping)}
+  end
+
+  @impl true
+  def handle_event("change_step_budget", %{"step_budget" => "time"}, socket) do
+    {:noreply, socket |> assign(:step_budget, nil) |> add_log("📏 Budget → time-based")}
+  end
+
+  def handle_event("change_step_budget", %{"step_budget" => val}, socket) do
+    case Integer.parse(val) do
+      {steps, _} when steps > 0 ->
+        label = if steps >= 1000, do: "#{div(steps, 1000)}k", else: "#{steps}"
+        {:noreply, socket |> assign(:step_budget, steps) |> add_log("📏 Step budget → #{label} steps")}
+
+      _ ->
+        {:noreply, socket}
+    end
   end
 
   @impl true
@@ -640,6 +660,15 @@ defmodule ExAutoresearchWeb.DashboardLive do
                 class="bg-zinc-800 border border-zinc-700 text-zinc-300 text-sm rounded-lg px-2 py-1.5 focus:ring-indigo-500 focus:border-indigo-500">
                 <%= for {secs, label} <- [{15, "15s"}, {60, "1m"}, {120, "2m"}, {300, "5m"}, {600, "10m"}, {900, "15m"}] do %>
                   <option value={secs} selected={secs == @time_budget}><%= label %></option>
+                <% end %>
+              </select>
+            </form>
+            <form phx-change="change_step_budget" class="flex items-center gap-1">
+              <select name="step_budget"
+                class="bg-zinc-800 border border-zinc-700 text-zinc-300 text-sm rounded-lg px-2 py-1.5 focus:ring-indigo-500 focus:border-indigo-500">
+                <option value="time" selected={@step_budget == nil}>⏱ Time</option>
+                <%= for {steps, label} <- [{50_000, "50k"}, {100_000, "100k"}, {150_000, "150k"}, {200_000, "200k"}, {300_000, "300k"}, {500_000, "500k"}] do %>
+                  <option value={steps} selected={steps == @step_budget}>📏 <%= label %></option>
                 <% end %>
               </select>
             </form>
