@@ -50,7 +50,7 @@ defmodule ExAutoresearchWeb.DashboardLive do
       |> assign(:time_budget, 300)
       |> assign(:current_step, nil)
       |> assign(:current_progress, nil)
-      |> assign(:trial_losses, [])
+      |> assign(:live_curves, %{})
       |> assign(:agent_log, [])
       |> assign(:selected, selected)
       |> assign(:current_backend, current_backend)
@@ -59,7 +59,8 @@ defmodule ExAutoresearchWeb.DashboardLive do
       |> assign(:chart_trials, trials)
       |> stream(:trials, trials, at: 0)
 
-    {:ok, push_chart(socket)}
+    socket = push_chart(socket)
+    {:ok, push_live_chart(socket)}
   end
 
   # --- Events ---
@@ -182,16 +183,14 @@ defmodule ExAutoresearchWeb.DashboardLive do
   @impl true
   def handle_event("select_version", %{"version" => vid}, socket) do
     selected = load_version(vid)
-    socket = assign(socket, :selected, selected)
-    {:noreply, push_trial_chart(socket, selected[:loss_history] || [])}
+    {:noreply, assign(socket, :selected, selected)}
   end
 
   @impl true
   def handle_event("select_best", _params, socket) do
     agent = Researcher.status()
     selected = if(agent.best_version, do: load_version(agent.best_version))
-    socket = assign(socket, :selected, selected)
-    {:noreply, push_trial_chart(socket, (selected && selected[:loss_history]) || [])}
+    {:noreply, assign(socket, :selected, selected)}
   end
 
   @impl true
@@ -246,21 +245,25 @@ defmodule ExAutoresearchWeb.DashboardLive do
 
   @impl true
   def handle_info({:trial_started, p}, socket) do
+    vid = p[:version_id]
+    gpu = p[:gpu] || "local"
+
     {:noreply,
      socket
      |> assign(:current_step, 0)
      |> assign(:current_progress, 0)
-     |> assign(:trial_losses, [])
-     |> push_trial_chart([])
-     |> add_log("🧪 Started: #{p[:description]} (v_#{p[:version_id]})")}
+     |> update(:live_curves, &Map.put(&1, vid, []))
+     |> push_live_chart()
+     |> add_log("🧪 Started: #{p[:description]} (v_#{vid}) on #{gpu}")}
   end
 
   @impl true
   def handle_info({:trial_completed, r}, socket) do
     tag = if r[:kept], do: "✅ kept", else: "❌ discarded"
+    gpu = r[:gpu] || "local"
     entry = trial_to_map(r)
 
-    # Add to chart data
+    # Add to chart data, remove from live curves
     chart_trials = [entry | socket.assigns.chart_trials]
 
     socket =
@@ -268,27 +271,29 @@ defmodule ExAutoresearchWeb.DashboardLive do
       |> stream_insert(:trials, entry, at: 0)
       |> assign(:current_step, nil)
       |> assign(:current_progress, nil)
-      |> assign(:trial_losses, [])
+      |> update(:live_curves, &Map.delete(&1, r[:version_id]))
       |> assign(:chart_trials, chart_trials)
-      |> add_log("#{tag} v_#{r[:version_id]} loss=#{safe_fmt(r[:loss])} — #{r[:description]}")
+      |> add_log("#{tag} v_#{r[:version_id]} loss=#{safe_fmt(r[:loss])} — #{r[:description]} [#{gpu}]")
 
     socket =
       if r[:kept], do: assign(socket, :selected, load_version(r[:version_id])), else: socket
 
-    {:noreply, push_chart(socket)}
+    {:noreply, socket |> push_chart() |> push_live_chart()}
   end
 
   @impl true
   def handle_info({:step, p}, socket) do
     step = p[:step]
     loss = p[:loss]
+    vid = p[:version_id]
 
     socket = socket |> assign(:current_step, step) |> assign(:current_progress, p[:progress])
 
-    # Accumulate loss data every 50 steps and push chart update
-    if loss && step && rem(step, 50) == 0 do
-      trial_losses = socket.assigns.trial_losses ++ [[step, loss]]
-      {:noreply, socket |> assign(:trial_losses, trial_losses) |> push_trial_chart(trial_losses)}
+    if loss && step && vid && rem(step, 50) == 0 do
+      live_curves =
+        Map.update(socket.assigns.live_curves, vid, [[step, loss]], &(&1 ++ [[step, loss]]))
+
+      {:noreply, socket |> assign(:live_curves, live_curves) |> push_live_chart()}
     else
       {:noreply, socket}
     end
@@ -340,6 +345,7 @@ defmodule ExAutoresearchWeb.DashboardLive do
       kept: exp.kept,
       status: exp.status,
       model: exp.model,
+      gpu: nil,
       timestamp: exp.inserted_at
     }
   end
@@ -356,6 +362,7 @@ defmodule ExAutoresearchWeb.DashboardLive do
       kept: r[:kept],
       status: r[:status],
       model: r[:model],
+      gpu: r[:gpu],
       timestamp: DateTime.utc_now()
     }
   end
@@ -391,8 +398,14 @@ defmodule ExAutoresearchWeb.DashboardLive do
 
   defp decode_loss_history(json) when is_binary(json) do
     case Jason.decode(json) do
-      {:ok, points} -> points
-      _ -> []
+      {:ok, points} ->
+        Enum.filter(points, fn
+          [_step, loss] when is_number(loss) -> true
+          _ -> false
+        end)
+
+      _ ->
+        []
     end
   end
 
@@ -472,21 +485,41 @@ defmodule ExAutoresearchWeb.DashboardLive do
     push_event(socket, "chart-data-loss-chart", chart_option)
   end
 
-  defp push_trial_chart(socket, data) do
-    chart_option = %{
-      backgroundColor: "transparent",
-      tooltip: %{trigger: "axis"},
-      xAxis: %{type: "value", name: "Step", nameLocation: "center", nameGap: 25},
-      yAxis: %{type: "value", name: "Loss", nameLocation: "center", nameGap: 45},
-      series: [
+  @curve_colors ["#818cf8", "#34d399", "#f472b6", "#fbbf24", "#60a5fa", "#a78bfa"]
+
+  defp push_live_chart(socket) do
+    curves = socket.assigns.live_curves
+
+    series =
+      curves
+      |> Enum.sort_by(fn {vid, _} -> vid end)
+      |> Enum.with_index()
+      |> Enum.map(fn {{vid, data}, i} ->
+        color = Enum.at(@curve_colors, rem(i, length(@curve_colors)))
+
         %{
+          name: "v_#{vid}",
           type: "line",
           showSymbol: false,
           smooth: true,
-          lineStyle: %{color: "#818cf8", width: 2},
+          lineStyle: %{color: color, width: 2},
           data: data
         }
-      ]
+      end)
+
+    chart_option = %{
+      backgroundColor: "transparent",
+      tooltip: %{trigger: "axis"},
+      legend: %{
+        data: Enum.map(series, & &1.name),
+        textStyle: %{color: "#a1a1aa", fontSize: 10},
+        top: 0,
+        right: 0
+      },
+      grid: %{top: 30},
+      xAxis: %{type: "value", name: "Step", nameLocation: "center", nameGap: 25},
+      yAxis: %{type: "log", name: "Loss", nameLocation: "center", nameGap: 45, axisLabel: %{formatter: "{value}"}},
+      series: series
     }
 
     push_event(socket, "chart-data-trial-loss-chart", chart_option)
@@ -505,6 +538,20 @@ defmodule ExAutoresearchWeb.DashboardLive do
       |> String.replace("claude-", "")
       |> String.replace("gpt-", "gpt")
       |> String.replace("-preview", "")
+
+  defp fmt_duration(nil), do: "-"
+  defp fmt_duration(s) when is_number(s) and s < 60, do: "#{round(s)}s"
+  defp fmt_duration(s) when is_number(s), do: "#{div(round(s), 60)}m#{rem(round(s), 60)}s"
+
+  defp short_gpu(nil), do: "-"
+
+  defp short_gpu(label) when is_binary(label) do
+    cond do
+      String.contains?(label, "cuda") -> "🟢 CUDA"
+      String.contains?(label, "rocm") -> "🟠 ROCm"
+      true -> label
+    end
+  end
 
   defp fmt_time(nil, _tz), do: ""
 
@@ -678,6 +725,8 @@ defmodule ExAutoresearchWeb.DashboardLive do
                     <th class="text-left py-1.5 px-2">Version</th>
                     <th class="text-left py-1.5 px-2">Loss</th>
                     <th class="text-right py-1.5 px-2">Steps</th>
+                    <th class="text-right py-1.5 px-2">Duration</th>
+                    <th class="text-left py-1.5 px-2">GPU</th>
                     <th class="text-left py-1.5 px-2">Model</th>
                     <th class="text-center py-1.5 px-2"></th>
                   </tr>
@@ -708,6 +757,8 @@ defmodule ExAutoresearchWeb.DashboardLive do
                     </td>
                     <td class="py-1.5 px-2 font-mono text-zinc-300 text-sm">{safe_fmt(t[:loss])}</td>
                     <td class="py-1.5 px-2 text-right text-zinc-500 text-xs">{t[:steps] || "-"}</td>
+                    <td class="py-1.5 px-2 text-right text-zinc-500 text-xs">{fmt_duration(t[:training_seconds])}</td>
+                    <td class="py-1.5 px-2 text-xs text-zinc-500">{short_gpu(t[:gpu])}</td>
                     <td class="py-1.5 px-2 text-xs text-zinc-500">{short_model(t[:model])}</td>
                     <td class="py-1.5 px-2 text-center">
                       {if t[:kept], do: "✅", else: if(t[:status] == :crashed, do: "💥", else: "❌")}

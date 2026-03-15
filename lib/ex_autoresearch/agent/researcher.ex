@@ -218,6 +218,8 @@ defmodule ExAutoresearch.Agent.Researcher do
 
   # --- Experiment loop ---
 
+  @max_consecutive_errors 5
+
   defp experiment_loop(run) do
     # Run baseline if no experiments yet (always on local node)
     if Registry.count_trials(run.id) == 0 do

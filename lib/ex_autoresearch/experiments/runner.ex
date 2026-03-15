@@ -118,6 +118,7 @@ defmodule ExAutoresearch.Experiments.Runner do
             "agent:events",
             {:step,
              %{
+               version_id: version_id,
                step: step,
                loss: loss,
                progress: training_progress(time_budget_ms)
