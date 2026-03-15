@@ -26,7 +26,7 @@ exla_clients =
     "rocm" ->
       [host: [platform: :host], rocm: [platform: :rocm, preallocate: false]]
 
-    "cuda" ->
+    cuda when cuda in ["cuda", "cuda12"] ->
       [host: [platform: :host], cuda: [platform: :cuda, preallocate: true]]
 
     _ ->

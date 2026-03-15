@@ -17,10 +17,11 @@ defmodule ExAutoresearch.MixProject do
 
         System.put_env("XLA_TARGET", "rocm")
 
-      "cuda" ->
+      cuda when cuda in ["cuda", "cuda12"] ->
         # For Blackwell GPUs, set XLA_ARCHIVE_URL to a custom CUDA build from xla_rocm,
         # or set XLA_BUILD=true to build from source with CUDA support.
-        System.put_env("XLA_TARGET", "cuda")
+        # EXLA precompiled archives use "cuda12" as the target name.
+        System.put_env("XLA_TARGET", "cuda12")
 
       _ ->
         # Default to ROCm (Framework Laptop iGPU)

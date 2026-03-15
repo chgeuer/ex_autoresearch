@@ -48,21 +48,33 @@ defmodule ExAutoresearch.Cluster.LocalWorker do
 
     mix_env = if function_exported?(Mix, :env, 0), do: Atom.to_string(Mix.env()), else: "dev"
 
+    # Hermetic CUDA 12.8 runtime libraries (extracted from Docker build cache).
+    # Required because system CUDA 13 compat symlinks don't satisfy versioned symbols.
+    cuda_libs_dir = Path.join(project_dir, "_build/cuda_libs")
+
+    ld_path =
+      [cuda_libs_dir, System.get_env("LD_LIBRARY_PATH")]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join(":")
+
     env = [
       {~c"WORKER_ONLY", ~c"1"},
       {~c"GPU_TARGET", String.to_charlist(gpu_target)},
+      {~c"XLA_TARGET", String.to_charlist(xla_target(gpu_target))},
       {~c"MIX_ENV", String.to_charlist(mix_env)},
-      {~c"MIX_BUILD_PATH", String.to_charlist(build_path)}
+      {~c"MIX_BUILD_PATH", String.to_charlist(build_path)},
+      {~c"LD_LIBRARY_PATH", String.to_charlist(ld_path)}
     ]
 
     {name_flag, full_node_name} =
       case Atom.to_string(node()) do
         name_str ->
-          if String.contains?(name_str, ".") or String.match?(name_str, ~r/@\d+\.\d+/) do
-            host_part = name_str |> String.split("@") |> List.last()
+          host_part = name_str |> String.split("@") |> List.last()
+
+          if String.contains?(host_part, ".") or String.match?(host_part, ~r/^\d+\.\d+/) do
             {"--name", "#{name}@#{host_part}"}
           else
-            {"--sname", name}
+            {"--sname", "#{name}@#{host_part}"}
           end
       end
 
@@ -145,4 +157,8 @@ defmodule ExAutoresearch.Cluster.LocalWorker do
     if state.port && Port.info(state.port), do: Port.close(state.port)
     :ok
   end
+
+  defp xla_target("cuda"), do: "cuda12"
+  defp xla_target("rocm"), do: "rocm"
+  defp xla_target(_), do: "host"
 end
