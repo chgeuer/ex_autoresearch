@@ -228,14 +228,15 @@ defmodule ExAutoresearch.Agent.Researcher do
   @max_consecutive_errors 5
 
   defp experiment_loop(run) do
-    # Run baseline if no experiments yet (always on local node)
+    nodes = gpu_nodes()
+
+    # Run baseline if no experiments yet — prefer the fastest GPU (workers first)
     if Registry.count_trials(run.id) == 0 do
-      Logger.info("[#{run.tag}] Running baseline...")
-      run_baseline(run)
+      {baseline_label, baseline_node} = List.last(nodes)
+      Logger.info("[#{run.tag}] Running baseline on #{baseline_label}...")
+      run_baseline(run, baseline_label, baseline_node)
     end
 
-    # Detect available GPU nodes: local + any connected workers
-    nodes = gpu_nodes()
     Logger.info("[#{run.tag}] Starting #{length(nodes)} parallel GPU loop(s): #{inspect(Enum.map(nodes, &elem(&1, 0)))}")
 
     # Spawn one independent loop per GPU node
@@ -316,7 +317,7 @@ defmodule ExAutoresearch.Agent.Researcher do
     end
   end
 
-  defp run_baseline(run) do
+  defp run_baseline(run, label, target_node) do
     version_id = gen_id()
     template = Prompts.read("template.md")
 
@@ -342,9 +343,9 @@ defmodule ExAutoresearch.Agent.Researcher do
             status: :running
           })
 
-        broadcast(:trial_started, %{version_id: version_id, description: "baseline"})
+        broadcast(:trial_started, %{version_id: version_id, description: "baseline", gpu: label})
 
-        result = Runner.run(module, version_id: version_id, time_budget: effective_time_budget(run, 0), step_budget: run.step_budget)
+        result = run_on_node(target_node, module, code, version_id, effective_time_budget(run, 0), run.step_budget)
 
         experiment =
           Registry.complete_trial(experiment, %{
@@ -363,7 +364,8 @@ defmodule ExAutoresearch.Agent.Researcher do
           Map.merge(result, %{
             description: "baseline",
             kept: result[:loss] != nil,
-            model: run.model
+            model: run.model,
+            gpu: label
           })
         )
 
