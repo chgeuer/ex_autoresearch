@@ -26,7 +26,12 @@ defmodule ExAutoresearch.Agent.Researcher do
                            time_budget: [
                              type: :pos_integer,
                              default: 15,
-                             doc: "Seconds per trial"
+                             doc: "Starting seconds per trial (min when adaptive)"
+                           ],
+                           max_time_budget: [
+                             type: {:or, [:pos_integer, {:in, [nil]}]},
+                             default: 300,
+                             doc: "Max seconds per trial. Set nil to disable adaptive scaling."
                            ]
                          )
 
@@ -76,6 +81,7 @@ defmodule ExAutoresearch.Agent.Researcher do
 
       {:ok, run} ->
         best = Registry.best_trial(run.id)
+        kept_count = length(Registry.kept_trials(run.id))
 
         %{
           status: run.status,
@@ -83,7 +89,8 @@ defmodule ExAutoresearch.Agent.Researcher do
           trial_count: Registry.count_trials(run.id),
           best_loss: best && best.final_loss,
           best_version: best && best.version_id,
-          model: run.model
+          model: run.model,
+          time_budget: effective_time_budget(run, kept_count)
         }
     end
   rescue
@@ -131,13 +138,19 @@ defmodule ExAutoresearch.Agent.Researcher do
     tag = opts[:tag]
     model = opts[:model]
     time_budget = opts[:time_budget]
+    max_time_budget = opts[:max_time_budget]
 
     # Resume existing run or create new one
     run =
       case Registry.get_campaign(tag) do
         {:ok, nil} ->
           Logger.info("Creating new run: #{tag}")
-          Registry.start_campaign(tag, model: model, time_budget: time_budget)
+
+          Registry.start_campaign(tag,
+            model: model,
+            time_budget: time_budget,
+            max_time_budget: max_time_budget
+          )
 
         {:ok, existing} ->
           Logger.info("Resuming run: #{tag} (#{Registry.count_trials(existing.id)} experiments)")
@@ -208,19 +221,31 @@ defmodule ExAutoresearch.Agent.Researcher do
     loop(run)
   end
 
-  defp loop(run) do
+  @max_consecutive_errors 5
+
+  defp loop(run, consecutive_errors \\ 0) do
     # Re-read run from DB to get latest status/model (may have been changed mid-flight)
     run = Ash.get!(ExAutoresearch.Research.Campaign, run.id)
 
     if run.status == :running do
       case propose_and_run(run) do
         :ok ->
-          loop(run)
+          loop(run, 0)
 
         {:error, reason} ->
-          Logger.error("Experiment failed: #{inspect(reason, limit: 3)}")
-          Process.sleep(3_000)
-          loop(run)
+          errors = consecutive_errors + 1
+          Logger.error("Experiment failed (#{errors}/#{@max_consecutive_errors}): #{inspect(reason, limit: 3)}")
+          broadcast(:experiment_error, %{error: inspect(reason, limit: 3), attempt: errors, max: @max_consecutive_errors})
+
+          if errors >= @max_consecutive_errors do
+            Logger.error("[#{run.tag}] Too many consecutive errors, pausing campaign")
+            Registry.pause_campaign(run)
+            broadcast(:status_changed, %{status: :paused})
+          else
+            backoff = min(3_000 * errors, 15_000)
+            Process.sleep(backoff)
+            loop(run, errors)
+          end
       end
     else
       Logger.info("[#{run.tag}] Research loop stopped")
@@ -255,7 +280,7 @@ defmodule ExAutoresearch.Agent.Researcher do
 
         broadcast(:trial_started, %{version_id: version_id, description: "baseline"})
 
-        result = Runner.run(module, version_id: version_id, time_budget: run.time_budget)
+        result = Runner.run(module, version_id: version_id, time_budget: effective_time_budget(run, 0))
 
         experiment =
           Registry.complete_trial(experiment, %{
@@ -263,7 +288,8 @@ defmodule ExAutoresearch.Agent.Researcher do
             num_steps: result[:steps],
             training_seconds: result[:training_seconds],
             status: if(result[:loss], do: :completed, else: :crashed),
-            kept: result[:loss] != nil
+            kept: result[:loss] != nil,
+            loss_history: Jason.encode!(result[:loss_history] || [])
           })
 
         if result[:loss], do: Registry.update_campaign_best(run, experiment.id)
@@ -287,6 +313,7 @@ defmodule ExAutoresearch.Agent.Researcher do
     all_exps = Registry.all_trials(run.id)
     best = Registry.best_trial(run.id)
     kept = Registry.kept_trials(run.id)
+    effective_budget = effective_time_budget(run, length(kept))
 
     # Build prompt with full context
     prompt = Prompts.build_proposal_prompt(all_exps, best, kept, version_id)
@@ -319,7 +346,7 @@ defmodule ExAutoresearch.Agent.Researcher do
 
             broadcast(:trial_started, %{version_id: version_id, description: description})
 
-            result = Runner.run(module, version_id: version_id, time_budget: run.time_budget)
+            result = Runner.run(module, version_id: version_id, time_budget: effective_budget)
 
             loss = sanitize_loss(result[:loss])
             kept = decide_keep(loss, best && best.final_loss)
@@ -330,7 +357,8 @@ defmodule ExAutoresearch.Agent.Researcher do
                 num_steps: result[:steps],
                 training_seconds: result[:training_seconds],
                 status: if(loss, do: :completed, else: :crashed),
-                kept: kept
+                kept: kept,
+                loss_history: Jason.encode!(result[:loss_history] || [])
               })
 
             if kept, do: Registry.update_campaign_best(run, experiment.id)
@@ -419,6 +447,21 @@ defmodule ExAutoresearch.Agent.Researcher do
   defp decide_keep(loss, baseline) do
     Logger.info("❌ No improvement: #{safe_round(loss, 6)} >= #{safe_round(baseline, 6)}")
     false
+  end
+
+  # Adaptive time budget: starts at time_budget, doubles per kept trial, caps at max_time_budget.
+  # When max_time_budget is nil, uses time_budget as fixed value.
+  defp effective_time_budget(run, kept_count) do
+    case run.max_time_budget do
+      nil ->
+        run.time_budget
+
+      max when is_integer(max) ->
+        budget = run.time_budget * Integer.pow(2, kept_count)
+        budget = min(budget, max)
+        Logger.info("[#{run.tag}] Adaptive time budget: #{budget}s (#{kept_count} kept, range #{run.time_budget}–#{max}s)")
+        budget
+    end
   end
 
   defp safe_round(val, d) when is_float(val), do: Float.round(val, d)

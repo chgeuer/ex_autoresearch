@@ -28,12 +28,14 @@ defmodule ExAutoresearch.Experiments.Registry do
   def start_campaign(tag, opts \\ []) do
     model = Keyword.get(opts, :model, "claude-sonnet-4")
     time_budget = Keyword.get(opts, :time_budget, 15)
+    max_time_budget = Keyword.get(opts, :max_time_budget)
     base_config = Keyword.get(opts, :base_config, %{})
 
     Ash.create!(Campaign, %{
       tag: tag,
       model: model,
       time_budget: time_budget,
+      max_time_budget: max_time_budget,
       base_config: base_config
     })
   end
@@ -59,6 +61,13 @@ defmodule ExAutoresearch.Experiments.Registry do
       {:ok, run} -> {:ok, run}
       {:error, _} -> {:ok, nil}
     end
+  end
+
+  @spec list_campaigns() :: [Campaign.t()]
+  def list_campaigns do
+    Campaign
+    |> Ash.Query.sort(updated_at: :desc)
+    |> Ash.read!()
   end
 
   @spec active_campaign() :: {:ok, Campaign.t() | nil} | {:error, term()}
@@ -88,6 +97,11 @@ defmodule ExAutoresearch.Experiments.Registry do
   @spec update_campaign_best(Campaign.t(), String.t()) :: Campaign.t()
   def update_campaign_best(run, experiment_id) do
     Ash.update!(run, %{best_trial_id: experiment_id}, action: :update_status)
+  end
+
+  @spec update_campaign_time_budget(Campaign.t(), integer()) :: Campaign.t()
+  def update_campaign_time_budget(run, time_budget) do
+    Ash.update!(run, %{time_budget: time_budget}, action: :update_time_budget)
   end
 
   # --- Trial CRUD (SQLite-backed) ---
