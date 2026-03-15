@@ -239,6 +239,12 @@ defmodule ExAutoresearch.Agent.Researcher do
 
     Logger.info("[#{run.tag}] Starting #{length(nodes)} parallel GPU loop(s): #{inspect(Enum.map(nodes, &elem(&1, 0)))}")
 
+    # Start the referee that monitors concurrent trials and kills losers
+    referee = if run.step_budget && length(nodes) > 1 do
+      {:ok, pid} = ExAutoresearch.Agent.Referee.start_link(step_budget: run.step_budget)
+      pid
+    end
+
     # Spawn one independent loop per GPU node
     tasks =
       nodes
@@ -248,6 +254,8 @@ defmodule ExAutoresearch.Agent.Researcher do
 
     # Wait for all loops to finish (they run until campaign is paused/stopped)
     Task.await_many(tasks, :infinity)
+
+    if referee, do: GenServer.stop(referee, :normal)
   end
 
   # Returns [{label, node_atom}] for each available GPU.
@@ -416,14 +424,22 @@ defmodule ExAutoresearch.Agent.Researcher do
             result = run_on_node(target_node, module, code, version_id, effective_budget, run.step_budget)
 
             loss = sanitize_loss(result[:loss])
-            kept = decide_keep(loss, best && best.final_loss)
+            halted? = result[:status] == :halted
+            kept = if halted?, do: false, else: decide_keep(loss, best && best.final_loss)
+
+            trial_status =
+              cond do
+                halted? -> :discarded
+                loss -> :completed
+                true -> :crashed
+              end
 
             experiment =
               Registry.complete_trial(experiment, %{
                 final_loss: loss,
                 num_steps: result[:steps],
                 training_seconds: result[:training_seconds],
-                status: if(loss, do: :completed, else: :crashed),
+                status: trial_status,
                 kept: kept,
                 loss_history: Jason.encode!(result[:loss_history] || [])
               })

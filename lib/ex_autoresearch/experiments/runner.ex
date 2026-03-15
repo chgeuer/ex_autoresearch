@@ -4,11 +4,47 @@ defmodule ExAutoresearch.Experiments.Runner do
 
   Takes a module that implements build/0, config/0, optimizer/0,
   trains it for the time budget, and returns results.
+
+  Supports external early-stop signals via `halt/1` — the halt_handler
+  checks a process dictionary flag every iteration, allowing the
+  researcher to kill losing trials mid-flight.
   """
 
   require Logger
 
   alias ExAutoresearch.Data.Loader, as: DataLoader
+
+  @halt_table __MODULE__.HaltSignals
+
+  def init_halt_table do
+    if :ets.whereis(@halt_table) == :undefined do
+      :ets.new(@halt_table, [:named_table, :set, :public, write_concurrency: true])
+    end
+  end
+
+  @doc "Signal a running trial to stop early."
+  def halt(version_id) do
+    init_halt_table()
+    :ets.insert(@halt_table, {version_id, true})
+    Logger.info("[#{version_id}] Halt signal sent")
+  end
+
+  defp halted?(version_id) do
+    case :ets.whereis(@halt_table) do
+      :undefined -> false
+      _ ->
+        case :ets.lookup(@halt_table, version_id) do
+          [{_, true}] -> true
+          _ -> false
+        end
+    end
+  end
+
+  defp clear_halt(version_id) do
+    if :ets.whereis(@halt_table) != :undefined do
+      :ets.delete(@halt_table, version_id)
+    end
+  end
 
   @default_time_budget to_timeout(minute: 5) |> div(1000)
 
@@ -41,6 +77,8 @@ defmodule ExAutoresearch.Experiments.Runner do
     time_budget = opts[:time_budget]
     step_budget = opts[:step_budget]
     version_id = opts[:version_id]
+    init_halt_table()
+    clear_halt(version_id)
     do_run(module, version_id, time_budget, step_budget)
   end
 
@@ -107,6 +145,7 @@ defmodule ExAutoresearch.Experiments.Runner do
         cond do
           step_budget && steps >= step_budget -> true
           elapsed >= time_budget_ms -> true
+          rem(steps, 500) == 0 and halted?(version_id) -> true
           true -> false
         end
 
@@ -159,14 +198,18 @@ defmodule ExAutoresearch.Experiments.Runner do
 
     steps = Process.get(:training_steps, 0)
     loss = Process.get(:last_loss)
+    was_halted = halted?(version_id)
+    clear_halt(version_id)
+
+    status = if was_halted, do: :halted, else: :completed
 
     Logger.info(
-      "[#{version_id}] Done: #{steps} steps in #{safe_round(elapsed_s, 1)}s, loss=#{loss && safe_round(loss, 6)}"
+      "[#{version_id}] Done: #{steps} steps in #{safe_round(elapsed_s, 1)}s, loss=#{loss && safe_round(loss, 6)}#{if was_halted, do: " (halted by referee)"}"
     )
 
     %{
       version_id: version_id,
-      status: :completed,
+      status: status,
       loss: loss,
       steps: steps,
       training_seconds: safe_round(elapsed_s, 1),
