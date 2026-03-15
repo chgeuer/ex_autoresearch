@@ -26,6 +26,8 @@ defmodule ExAutoresearch.Experiments.Runner do
     if :ets.whereis(@checkpoint_table) == :undefined do
       :ets.new(@checkpoint_table, [:named_table, :set, :public])
     end
+  rescue
+    ArgumentError -> :ok
   end
 
   @doc "Signal a running trial to stop early."

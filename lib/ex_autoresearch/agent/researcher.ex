@@ -737,6 +737,8 @@ defmodule ExAutoresearch.Agent.Researcher do
     if :ets.whereis(@migration_table) == :undefined do
       :ets.new(@migration_table, [:named_table, :set, :public])
     end
+  rescue
+    ArgumentError -> :ok
   end
 
   @doc false
