@@ -8,6 +8,8 @@ defmodule ExAutoresearch.Agent.Prompts do
   @prompts_dir "priv/prompts"
   @pitfalls_path Path.join(@prompts_dir, "pitfalls.md")
 
+  import MDEx.Sigil
+
   def read(filename) do
     path = Path.join([@prompts_dir, filename])
 
@@ -37,17 +39,22 @@ defmodule ExAutoresearch.Agent.Prompts do
       patterns = extract_patterns(crashed)
 
       if patterns != [] do
-        content = """
+        pitfall_items =
+          Enum.map_join(patterns, "\n", fn {pattern, examples} ->
+            count = length(examples)
+            example = hd(examples)
+            "- **#{pattern}** (#{count} crash#{if count > 1, do: "es"}):\n  #{example}\n"
+          end)
+
+        assigns = %{pitfall_items: pitfall_items}
+
+        content = ~MD"""
         ## Known Pitfalls — DO NOT repeat these mistakes
 
         The following patterns have caused crashes in this campaign. Avoid them.
 
-        #{Enum.map_join(patterns, "\n", fn {pattern, examples} ->
-          count = length(examples)
-          example = hd(examples)
-          "- **#{pattern}** (#{count} crash#{if count > 1, do: "es"}):\n  #{example}\n"
-        end)}
-        """
+        <%= @pitfall_items %>
+        """MD
 
         File.write!(@pitfalls_path, content)
       else
@@ -137,85 +144,85 @@ defmodule ExAutoresearch.Agent.Prompts do
 
   def build_proposal_prompt(history, best, kept_versions, version_id) do
     template_code = read("template.md")
+    recent = if history != [], do: Enum.take(history, -20), else: []
+    notable = kept_versions |> Enum.filter(& &1.code) |> Enum.take(3)
 
-    best_section =
-      if best do
-        """
-        ## Current best version (v_#{best.version_id}, loss: #{safe_round(best.final_loss, 6)})
+    assigns = %{
+      best:
+        best &&
+          %{
+            version_id: best.version_id,
+            loss: safe_round(best.final_loss, 6),
+            code: best.code
+          },
+      has_history: history != [],
+      recent:
+        Enum.map(recent, fn e ->
+          %{
+            version_id: e.version_id,
+            loss: safe_round(e.final_loss, 6) || "crash",
+            steps: e.num_steps || 0,
+            model: short_model(e.model),
+            desc: String.slice(e.description || "", 0, 80),
+            status: if(e.kept, do: "✅ kept", else: "❌ discarded")
+          }
+        end),
+      total: length(history),
+      kept_count: Enum.count(history, & &1.kept),
+      notable:
+        Enum.map(notable, fn e ->
+          %{
+            version_id: e.version_id,
+            loss: safe_round(e.final_loss, 6),
+            description: e.description,
+            code: e.code
+          }
+        end),
+      version_id: version_id,
+      template_code: template_code
+    }
 
-        ```elixir
-        #{best.code}
-        ```
-        """
-      else
-        "No experiments yet. Generate the baseline using the template below."
-      end
+    ~MD"""
+    <%= if @best do %>
+    ## Current best version (v_<%= @best.version_id %>, loss: <%= @best.loss %>)
 
-    history_section =
-      if history != [] do
-        recent = Enum.take(history, -20)
-        total = length(history)
-        kept_count = Enum.count(history, & &1.kept)
+    ```elixir
+    <%= @best.code %>
+    ```
+    <% else %>
+    No experiments yet. Generate the baseline using the template below.
+    <% end %>
 
-        rows =
-          recent
-          |> Enum.map(fn e ->
-            loss = safe_round(e.final_loss, 6) || "crash"
-            status = if e.kept, do: "✅ kept", else: "❌ discarded"
-            desc = String.slice(e.description || "", 0, 80)
-            model_tag = short_model(e.model)
+    <%= if @has_history do %>
+    ## Experiment history (<%= @total %> total, <%= @kept_count %> kept, showing last 20)
 
-            "| v_#{e.version_id} | #{loss} | #{e.num_steps || 0} | #{model_tag} | #{desc} | #{status} |"
-          end)
-          |> Enum.join("\n")
+    | Version | Loss | Steps | Model | Description | Status |
+    |---------|------|-------|-------|-------------|--------|
+    <%= for r <- @recent do %>| v_<%= r.version_id %> | <%= r.loss %> | <%= r.steps %> | <%= r.model %> | <%= r.desc %> | <%= r.status %> |
+    <% end %>
+    <% end %>
+    <%= if @notable != [] do %>
 
-        """
-        ## Experiment history (#{total} total, #{kept_count} kept, showing last 20)
+    ## Notable kept versions (source code)
 
-        | Version | Loss | Steps | Model | Description | Status |
-        |---------|------|-------|-------|-------------|--------|
-        #{rows}
-        """
-      else
-        ""
-      end
+    <%= for e <- @notable do %>
+    ### v_<%= e.version_id %> (loss: <%= e.loss %>) - <%= e.description %>
 
-    notable_section =
-      kept_versions
-      |> Enum.filter(& &1.code)
-      |> Enum.take(3)
-      |> Enum.map(fn e ->
-        """
-        ### v_#{e.version_id} (loss: #{safe_round(e.final_loss, 6)}) - #{e.description}
-
-        ```elixir
-        #{e.code}
-        ```
-        """
-      end)
-      |> Enum.join("\n")
-
-    notable_header =
-      if notable_section != "",
-        do: "## Notable kept versions (source code)\n\n#{notable_section}",
-        else: ""
-
-    """
-    #{best_section}
-
-    #{history_section}
-
-    #{notable_header}
+    ```elixir
+    <%= e.code %>
+    ```
+    <% end %>
+    <% end %>
 
     ## Your task
 
-    Generate a NEW experiment version. Your module must be named ExAutoresearch.Experiments.V_#{version_id}.
+    Generate a NEW experiment version. Your module must be named ExAutoresearch.Experiments.V_<%= @version_id %>.
 
     Output ONLY the complete defmodule block - no explanation outside the code.
     Put your reasoning in the @moduledoc string.
 
-    #{template_code}
-    """
+    <%= @template_code %>
+    """MD
   end
 
   defp safe_round(val, decimals) when is_float(val), do: Float.round(val, decimals)

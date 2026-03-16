@@ -10,6 +10,7 @@ defmodule ExAutoresearch.Campaigns.Exporter do
   alias ExAutoresearch.Model.Display
 
   require Ash.Query
+  import MDEx.Sigil
 
   @doc """
   Build a ZIP binary for the given campaign tag.
@@ -47,43 +48,54 @@ defmodule ExAutoresearch.Campaigns.Exporter do
   end
 
   defp trial_to_markdown(trial, idx) do
-    mermaid = build_mermaid_for_trial(trial)
+    assigns = %{
+      label: if(idx == 0, do: "Baseline", else: "Iteration #{idx}"),
+      version_id: trial.version_id,
+      loss_str: fmt_loss(trial.final_loss),
+      description: trial.description || "No description",
+      steps: trial.num_steps || "-",
+      training_time: fmt_seconds(trial.training_seconds),
+      model: trial.model || "-",
+      timestamp: trial.inserted_at,
+      show_reasoning: trial.reasoning != nil and trial.reasoning != trial.description,
+      reasoning: trial.reasoning,
+      code: String.trim(trial.code || ""),
+      mermaid: build_mermaid_for_trial(trial)
+    }
 
-    label = if idx == 0, do: "Baseline", else: "Iteration #{idx}"
-    loss_str = fmt_loss(trial.final_loss)
+    ~MD"""
+    # <%= @label %>: V_<%= @version_id %> (loss: <%= @loss_str %>)
 
-    lines = [
-      "# #{label}: V_#{trial.version_id} (loss: #{loss_str})",
-      "",
-      "> #{trial.description || "No description"}",
-      "",
-      "| Metric | Value |",
-      "|--------|-------|",
-      "| Loss | #{fmt_loss(trial.final_loss)} |",
-      "| Steps | #{trial.num_steps || "-"} |",
-      "| Training time | #{fmt_seconds(trial.training_seconds)} |",
-      "| Model | #{trial.model || "-"} |",
-      "| Timestamp | #{trial.inserted_at} |",
-      ""
-    ]
+    > <%= @description %>
 
-    lines =
-      if trial.reasoning && trial.reasoning != trial.description do
-        lines ++ ["## Reasoning", "", trial.reasoning, ""]
-      else
-        lines
-      end
+    | Metric        | Value                 |
+    |---------------|-----------------------|
+    | Loss          | <%= @loss_str %>      |
+    | Steps         | <%= @steps %>         |
+    | Training time | <%= @training_time %> |
+    | Model         | <%= @model %>         |
+    | Timestamp     | <%= @timestamp %>     |
+    <%= if @show_reasoning do %>
 
-    lines = lines ++ ["## Source Code", "", "```elixir", String.trim(trial.code || ""), "```", ""]
+    ## Reasoning
 
-    lines =
-      if mermaid do
-        lines ++ ["## Architecture", "", "```mermaid", mermaid, "```", ""]
-      else
-        lines
-      end
+    <%= @reasoning %>
+    <% end %>
 
-    Enum.join(lines, "\n")
+    ## Source Code
+
+    ```elixir
+    <%= @code %>
+    ```
+
+    <%= if @mermaid do %>
+    ## Architecture
+
+    ```mermaid
+    <%= @mermaid %>
+    ```
+    <% end %>
+    """MD
   end
 
   defp build_mermaid_for_trial(trial) do
