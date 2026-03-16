@@ -18,7 +18,7 @@ defmodule ExAutoresearch.Agent.Referee do
 
   alias ExAutoresearch.Experiments.Runner
 
-  defstruct [:step_budget, trials: %{}, migrating: nil]
+  defstruct [:step_budget, trials: %{}, killed: MapSet.new()]
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts)
@@ -38,74 +38,34 @@ defmodule ExAutoresearch.Agent.Referee do
 
   @impl true
   def handle_info({:trial_completed, %{version_id: vid}}, state) do
-    {:noreply, %{state | trials: Map.delete(state.trials, vid)}}
+    {:noreply, %{state |
+      trials: Map.delete(state.trials, vid),
+      killed: MapSet.delete(state.killed, vid)
+    }}
   end
 
   @impl true
   def handle_info({:step, %{version_id: vid, step: step, loss: loss}}, state) when is_number(loss) do
-    state = update_in(state.trials[vid], fn
-      nil -> %{points: [{step, loss}]}
-      trial -> %{trial | points: [{step, loss} | Enum.take(trial.points, 99)]}
-    end)
-
-    # Only compare when we have 2+ in-flight trials past the halfway checkpoint
-    active = state.trials |> Enum.filter(fn {_, t} -> length(t.points) > 0 end)
-
-    state =
-      if length(active) >= 2 do
-        maybe_kill_loser(state, active)
-      else
-        state
-      end
-
-    {:noreply, state}
-  end
-
-  @impl true
-  def handle_info({:queue_migration, winner_vid, loser_vid}, state) do
-    # The loser's GPU is now free. Get the winner's checkpoint and queue migration.
-    # Try local first, then remote nodes
-    checkpoint =
-      Runner.get_checkpoint(winner_vid) ||
-        Enum.find_value(Node.list(), fn node ->
-          case :rpc.call(node, Runner, :get_checkpoint, [winner_vid], 5_000) do
-            nil -> nil
-            {:badrpc, _} -> nil
-            ckpt -> ckpt
-          end
-        end)
-
-    if checkpoint do
-      # Get the winner's code from the database
-      case ExAutoresearch.Experiments.Registry.get_trial(winner_vid) do
-        {:ok, trial} when not is_nil(trial) and not is_nil(trial.code) ->
-          # Find which node the loser was on (that's the fast GPU we want to migrate to)
-          # For now, migrate to the first connected worker (CUDA)
-          fast_node =
-            Node.list()
-            |> Enum.find(fn n ->
-              name = Atom.to_string(n)
-              String.contains?(name, "cuda") or String.contains?(name, "worker")
-            end)
-            |> Kernel.||(node())
-
-          migration = %{
-            version_id: winner_vid,
-            code: trial.code,
-            checkpoint: checkpoint
-          }
-
-          ExAutoresearch.Agent.Researcher.queue_migration(fast_node, migration)
-          Logger.info("🔄 Migration queued: v_#{winner_vid} → #{fast_node}")
-
-        _ ->
-          Logger.warning("Migration failed: could not find code for v_#{winner_vid}")
-      end
+    # Ignore events from already-killed trials
+    if MapSet.member?(state.killed, vid) do
+      {:noreply, state}
     else
-      Logger.warning("Migration failed: no checkpoint found for v_#{winner_vid}")
-    end
+      state = update_in(state.trials[vid], fn
+        nil -> %{points: [{step, loss}]}
+        trial -> %{trial | points: [{step, loss} | Enum.take(trial.points, 99)]}
+      end)
 
-    {:noreply, state}
+      active = state.trials |> Enum.filter(fn {_, t} -> length(t.points) > 0 end)
+
+      state =
+        if length(active) >= 2 do
+          maybe_kill_loser(state, active)
+        else
+          state
+        end
+
+      {:noreply, state}
+    end
   end
 
   @impl true
@@ -141,26 +101,16 @@ defmodule ExAutoresearch.Agent.Referee do
         should_kill? = ratio > 1.2 or trending_up?
 
         if should_kill? do
-          # Determine which GPU is faster by comparing steps reached
-          {_, _, _, best_steps} = Enum.find(with_loss, fn {vid, _, _, _} -> vid == best_vid end)
-          {_, _, _, worst_steps} = Enum.find(with_loss, fn {vid, _, _, _} -> vid == worst_vid end)
-          winner_is_slower? = best_steps < worst_steps
-
           reason = if trending_up?, do: "loss trending upward", else: "#{Float.round((ratio - 1) * 100, 1)}% worse"
-          Logger.info("🏁 Referee: killing v_#{worst_vid} (#{reason} vs v_#{best_vid})")
+          Logger.info("🏁 Referee: halting v_#{worst_vid} (#{reason} vs v_#{best_vid})")
           kill_trial(worst_vid)
 
-          if winner_is_slower? do
-            # Winner is on the slow GPU — halt it for migration to the fast GPU
-            Logger.info("🔄 Referee: migrating winner v_#{best_vid} to faster GPU")
-            kill_trial(best_vid)
-
-            # The loser's gpu_loop will pick up the migration from the queue
-            # We need to wait briefly for checkpoints to be saved
-            Process.send_after(self(), {:queue_migration, best_vid, worst_vid}, 2_000)
-          end
-
-          %{state | trials: state.trials |> Map.delete(worst_vid) |> Map.delete(best_vid)}
+          # Only kill the loser — let the winner finish on its GPU.
+          # The loser's GPU is freed immediately for a new experiment.
+          %{state |
+            trials: Map.delete(state.trials, worst_vid),
+            killed: MapSet.put(state.killed, worst_vid)
+          }
         else
           state
         end
