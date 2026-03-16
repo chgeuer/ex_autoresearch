@@ -17,23 +17,31 @@ defmodule ExAutoresearch.Data.Tokenizer do
   def load(opts \\ []) do
     repo = Keyword.get(opts, :repo, "openai-community/gpt2")
 
-    case Bumblebee.load_tokenizer({:hf, repo}) do
-      {:ok, tokenizer} ->
-        {:ok,
-         %__MODULE__{
-           tokenizer: tokenizer,
-           vocab_size: 50257,
-           bos_token_id: 50256,
-           token_bytes: nil
-         }}
+    if Code.ensure_loaded?(Bumblebee) do
+      case apply(Bumblebee, :load_tokenizer, [{:hf, repo}]) do
+        {:ok, tokenizer} ->
+          {:ok,
+           %__MODULE__{
+             tokenizer: tokenizer,
+             vocab_size: 50257,
+             bos_token_id: 50256,
+             token_bytes: nil
+           }}
 
-      {:error, reason} ->
-        {:error, {:tokenizer_load_failed, reason}}
+        {:error, reason} ->
+          {:error, {:tokenizer_load_failed, reason}}
+      end
+    else
+      {:error, :bumblebee_not_available}
     end
   end
 
   @doc "Encode text to token IDs."
   def encode(%__MODULE__{tokenizer: tokenizer}, text) do
-    Bumblebee.apply_tokenizer(tokenizer, text)
+    if Code.ensure_loaded?(Bumblebee) do
+      apply(Bumblebee, :apply_tokenizer, [tokenizer, text])
+    else
+      {:error, :bumblebee_not_available}
+    end
   end
 end
