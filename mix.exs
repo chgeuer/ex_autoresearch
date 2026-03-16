@@ -126,15 +126,22 @@ defmodule ExAutoresearch.MixProject do
 
       # Data
       # {:arrow, "~> 0.1", only: [:dev, :test]},
-
       # Agent / LLM backends
-      {:jido_ghcopilot, path: Path.expand("~/github/agentjido/jido_ghcopilot")},
+       if System.get_env("USER") == "chgeuer" do
+        {:jido_ghcopilot, path: Path.expand("~/github/chgeuer/jido_ghcopilot")}
+      else
+        {:jido_ghcopilot, github: "chgeuer/jido_ghcopilot"}
+      end,
       {:claude_agent_sdk, "~> 0.14"},
       {:gemini_cli_sdk, "~> 0.1"},
-      # Required transitive overrides (not on hex.pm)
-      {:jido_shell, path: Path.expand("~/github/agentjido/jido_shell"), override: true},
-      {:jido_harness, path: Path.expand("~/github/agentjido/jido_harness"), override: true},
-      {:jido_vfs, path: Path.expand("~/github/agentjido/jido_vfs"), override: true},
+      # Overrides for transitive deps not yet on hex or needing version alignment
+      {:jido, "~> 2.1", override: true},
+      {:jido_action, "~> 2.1", override: true},
+      {:jido_signal, "~> 2.0", override: true},
+      {:libgraph, "~> 0.16.1-mg.1", hex: :multigraph, override: true},
+      {:jido_shell, github: "agentjido/jido_shell", override: true},
+      {:jido_harness, github: "agentjido/jido_harness", branch: "main", override: true},
+      {:jido_vfs, github: "agentjido/jido_vfs", override: true},
       {:sprites, github: "mikehostetler/sprites-ex", override: true}
     ]
   end

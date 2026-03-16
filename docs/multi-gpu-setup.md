@@ -12,20 +12,20 @@ experiment loop, sharing results through SQLite.
 │  Main BEAM node (ex_autoresearch@framework)     │
 │  GPU_TARGET=rocm   XLA_TARGET=rocm              │
 │                                                 │
-│  ┌───────────┐  ┌───────────┐  ┌─────────────┐ │
+│  ┌────────────┐  ┌───────────┐  ┌─────────────┐ │
 │  │ Researcher │  │ Registry  │  │  SQLite DB  │ │
 │  │ GenServer  │  │ (Ash/ETS) │  │  (shared)   │ │
-│  └─────┬─────┘  └───────────┘  └─────────────┘ │
+│  └─────┬──────┘  └───────────┘  └─────────────┘ │
 │        │                                        │
 │  ┌─────┴──────────────────┐                     │
 │  │  experiment_loop/1     │                     │
 │  │                        │                     │
 │  │  ┌──────────────────┐  │                     │
-│  │  │ gpu_loop (ROCm)  │──┼── LLM → compile →  │
+│  │  │ gpu_loop (ROCm)  │──┼── LLM → compile →   │
 │  │  │ local/rocm       │  │   train locally     │
 │  │  └──────────────────┘  │                     │
 │  │  ┌──────────────────┐  │                     │
-│  │  │ gpu_loop (CUDA)  │──┼── LLM → compile →  │
+│  │  │ gpu_loop (CUDA)  │──┼── LLM → compile →   │
 │  │  │ cuda_worker/cuda │  │   :rpc.call train   │
 │  │  └──────────────────┘  │        │            │
 │  └────────────────────────┘        │            │
