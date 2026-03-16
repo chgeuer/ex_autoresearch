@@ -36,12 +36,13 @@ defmodule ExAutoresearch.Research.Trial do
         :training_seconds,
         :num_steps,
         :kept,
-        :error
+        :error,
+        :gpu
       ]
     end
 
     update :complete do
-      accept [:status, :final_loss, :training_seconds, :num_steps, :kept, :error, :loss_history]
+      accept [:status, :final_loss, :training_seconds, :num_steps, :kept, :error, :loss_history, :gpu]
     end
   end
 
@@ -66,6 +67,7 @@ defmodule ExAutoresearch.Research.Trial do
     attribute :num_steps, :integer
     attribute :kept, :boolean, default: false
     attribute :error, :string
+    attribute :gpu, :string
     attribute :loss_history, :string
 
     timestamps()

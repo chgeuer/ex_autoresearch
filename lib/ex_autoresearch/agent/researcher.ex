@@ -18,7 +18,7 @@ defmodule ExAutoresearch.Agent.Researcher do
   require Logger
 
   alias ExAutoresearch.Experiments.{Registry, Loader, Runner}
-  alias ExAutoresearch.Agent.{LLM, Prompts}
+  alias ExAutoresearch.Agent.Prompts
   alias ExAutoresearch.Agent.LLM.CopilotBackend
 
   defstruct [:campaign_id, :task, status: :idle]
@@ -363,7 +363,8 @@ defmodule ExAutoresearch.Agent.Researcher do
             code: code,
             description: "baseline",
             model: run.model,
-            status: :running
+            status: :running,
+            gpu: label
           })
 
         broadcast(:trial_started, %{version_id: version_id, description: "baseline", gpu: label})
@@ -377,7 +378,8 @@ defmodule ExAutoresearch.Agent.Researcher do
             training_seconds: result[:training_seconds],
             status: if(result[:loss], do: :completed, else: :crashed),
             kept: result[:loss] != nil,
-            loss_history: Jason.encode!(result[:loss_history] || [])
+            loss_history: Jason.encode!(result[:loss_history] || []),
+            gpu: label
           })
 
         if result[:loss], do: Registry.update_campaign_best(run, experiment.id)
@@ -462,7 +464,8 @@ defmodule ExAutoresearch.Agent.Researcher do
             reasoning: reasoning,
             parent_id: best && best.id,
             model: run.model,
-            status: :running
+            status: :running,
+            gpu: label
           })
 
         broadcast(:trial_started, %{version_id: version_id, description: description, gpu: label})
@@ -479,7 +482,8 @@ defmodule ExAutoresearch.Agent.Researcher do
               status: :crashed,
               error: error_msg,
               training_seconds: result[:training_seconds],
-              num_steps: result[:steps]
+              num_steps: result[:steps],
+              gpu: label
             })
 
             broadcast(:trial_completed, %{
@@ -509,7 +513,8 @@ defmodule ExAutoresearch.Agent.Researcher do
               status: trial_status,
               kept: kept,
               error: result[:error],
-              loss_history: Jason.encode!(result[:loss_history] || [])
+              loss_history: Jason.encode!(result[:loss_history] || []),
+              gpu: label
             })
 
             if kept, do: Registry.update_campaign_best(run, experiment.id)
@@ -529,7 +534,7 @@ defmodule ExAutoresearch.Agent.Researcher do
           campaign_id: run.id, version_id: version_id, code: code,
           description: description, reasoning: reasoning,
           parent_id: best && best.id, model: run.model,
-          status: :crashed, error: error_msg
+          status: :crashed, error: error_msg, gpu: label
         })
 
         broadcast(:trial_completed, %{
@@ -548,7 +553,7 @@ defmodule ExAutoresearch.Agent.Researcher do
           campaign_id: run.id, version_id: version_id, code: code,
           description: description, reasoning: reasoning,
           parent_id: best && best.id, model: run.model,
-          status: :crashed, error: error_msg
+          status: :crashed, error: error_msg, gpu: label
         })
 
         broadcast(:trial_completed, %{
@@ -766,18 +771,27 @@ defmodule ExAutoresearch.Agent.Researcher do
 
     broadcast(:trial_started, %{version_id: vid, description: "migrated from slower GPU", gpu: label})
 
+    # Compile the experiment code on the target node, then resume from checkpoint
     result =
-      case :rpc.call(target_node, Runner, :resume,
-             [Module.concat(ExAutoresearch.Experiments, "V_#{vid}"),
-              checkpoint,
-              [version_id: vid, time_budget: effective_time_budget(run, 0), step_budget: run.step_budget]],
-             :infinity) do
-        {:badrpc, reason} ->
-          Logger.error("[#{vid}] Remote resume failed: #{inspect(reason, limit: 3)}")
-          %{version_id: vid, status: :crashed, loss: nil, steps: 0, training_seconds: 0, error: inspect(reason), loss_history: []}
+      case :rpc.call(target_node, Code, :compile_string, [code], 30_000) do
+        modules when is_list(modules) ->
+          {remote_module, _} = List.last(modules)
 
-        result when is_map(result) ->
-          result
+          case :rpc.call(target_node, Runner, :resume,
+                 [remote_module, checkpoint,
+                  [version_id: vid, time_budget: effective_time_budget(run, 0), step_budget: run.step_budget]],
+                 :infinity) do
+            {:badrpc, reason} ->
+              Logger.error("[#{vid}] Remote resume failed: #{inspect(reason, limit: 3)}")
+              %{version_id: vid, status: :crashed, loss: nil, steps: 0, training_seconds: 0, error: inspect(reason), loss_history: []}
+
+            result when is_map(result) ->
+              result
+          end
+
+        {:badrpc, reason} ->
+          Logger.error("[#{vid}] Remote compile for resume failed: #{inspect(reason, limit: 3)}")
+          %{version_id: vid, status: :crashed, loss: nil, steps: 0, training_seconds: 0, error: inspect(reason), loss_history: []}
       end
 
     loss = sanitize_loss(result[:loss])

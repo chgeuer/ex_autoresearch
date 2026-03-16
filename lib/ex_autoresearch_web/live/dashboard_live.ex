@@ -350,7 +350,7 @@ defmodule ExAutoresearchWeb.DashboardLive do
       kept: exp.kept,
       status: exp.status,
       model: exp.model,
-      gpu: nil,
+      gpu: exp.gpu,
       timestamp: exp.inserted_at
     }
   end
