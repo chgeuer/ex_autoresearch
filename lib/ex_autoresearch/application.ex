@@ -49,8 +49,7 @@ defmodule ExAutoresearch.Application do
   end
 
   defp skip_migrations?() do
-    # By default, sqlite migrations are run when using a release
-    System.get_env("RELEASE_NAME") == nil
+    System.get_env("SKIP_MIGRATIONS") == "true"
   end
 
   # Auto-spawn CUDA worker if the CUDA build and hermetic libs exist.
